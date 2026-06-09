@@ -61,14 +61,15 @@
     },
     {
       "quarter": "Q2 2026",
-      "spend": 4982.49,
+      "spend": 5202.63,
       "leads": 52,
       "qualified": 17,
-      "cpql": 293.09,
+      "cpql": 306.04,
       "won": 2,
-      "cpa": 2491.25,
+      "cpa": 2601.32,
       "winRate": 11.76,
-      "revenue": 92000
+      "revenue": 92000,
+      "roas": 17.68
     }
   ],
   "channelQuarterly": [
@@ -174,13 +175,13 @@
     {
       "quarter": "Q2 2026",
       "channel": "Meta Ads",
-      "spend": 4916.5,
+      "spend": 5136.64,
       "leads": 44,
       "qualified": 13,
-      "cpql": 378.19,
+      "cpql": 395.13,
       "won": 1,
       "revenue": 66000,
-      "roas": 13
+      "roas": 12.85
     },
     {
       "quarter": "Q2 2026",
@@ -1664,7 +1665,7 @@
       "label": "Meta Ads | 2026-05-25",
       "quarter": "Q2 2026",
       "channel": "Meta Ads",
-      "spend": 244.17,
+      "spend": 464.31,
       "clicks": 0,
       "ctr": 0,
       "leads": 3,
@@ -18678,7 +18679,7 @@
       "frequency": 1.3183609571398667,
       "linkClicks": 1482,
       "uniqueLinkClicks": 0,
-      "amountSpent": 4951.48,
+      "amountSpent": 5171.62,
       "leads": 55,
       "qualified": 13,
       "unqualified": 42,
@@ -19837,7 +19838,7 @@
           "reach": 0,
           "linkClicks": 10,
           "uniqueLinkClicks": 0,
-          "amountSpent": 37.08,
+          "amountSpent": 257.22,
           "cpm": 44.95,
           "cpc": 3.71,
           "ctr": 2.1818
