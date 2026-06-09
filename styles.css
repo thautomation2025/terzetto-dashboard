@@ -1573,6 +1573,31 @@ button:disabled {
   color: var(--muted);
 }
 
+.activity-card {
+  gap: 12px;
+}
+
+.activity-list {
+  display: grid;
+  gap: 8px;
+}
+
+.activity-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) minmax(120px, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(234, 233, 233, 0.34);
+}
+
+.activity-row span,
+.activity-row small {
+  color: var(--muted);
+}
+
 .reminder-item.is-current b {
   background: rgba(84, 72, 69, 0.1);
   color: var(--ink);
@@ -1841,6 +1866,7 @@ button:disabled {
   .quality-grid,
   .ranking-row,
   .funnel-row,
+  .activity-row,
   .comparison-line {
     grid-template-columns: 1fr;
   }

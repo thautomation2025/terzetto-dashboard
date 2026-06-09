@@ -1,5 +1,5 @@
 const DATA_URL = "data/marketing-data.json";
-const STORAGE_KEY = "digitalMarketingDashboard:data:v12";
+const STORAGE_KEY = "digitalMarketingDashboard:data:v13";
 const AUTH_KEY = "digitalMarketingDashboard:authRole";
 const ADMIN_PASSWORD = "admin2026";
 const CEO_PASSWORD = "terzettoceo2026";
@@ -58,6 +58,13 @@ function defaultAirtableEndpoint() {
   return "https://terzetto-dashboard.vercel.app/api/airtable-sync";
 }
 
+function defaultActivityEndpoint() {
+  if (window.location.protocol === "http:" || window.location.protocol === "https:") {
+    return `${window.location.origin}/api/activity-log`;
+  }
+  return "https://terzetto-dashboard.vercel.app/api/activity-log";
+}
+
 const state = {
   data: null,
   role: storageGet(AUTH_KEY) || null,
@@ -75,6 +82,9 @@ const state = {
   keywordPage: 1,
   keywordSearchTimer: null,
   toastTimer: null,
+  activityHistory: [],
+  activityHistoryLoaded: false,
+  lastLoggedActivityKey: "",
 };
 
 const money = new Intl.NumberFormat("en-CA", {
@@ -200,7 +210,7 @@ function currentQuarter() {
 function findQuarter(quarter) {
   if (isOverallPeriod(quarter)) {
     const rows = state.data.quarters || [];
-    const spend = sum(rows, "spend");
+    const spend = rows.reduce((total, row) => total + periodSpend(row.quarter, "All months", row.spend), 0);
     const leads = sum(rows, "leads");
     const qualified = sum(rows, "qualified");
     const won = sum(rows, "won");
@@ -218,6 +228,20 @@ function findQuarter(quarter) {
     };
   }
   return state.data.quarters.find((row) => row.quarter === quarter) || state.data.quarters[0] || {};
+}
+
+function periodSpend(quarter = state.quarter, month = "All months", fallback = 0) {
+  if (isOverallPeriod(quarter)) {
+    return uniqueQuarters().reduce((total, item) => total + periodSpend(item, "All months", 0), 0);
+  }
+  if (month !== "All months") {
+    const weeklySpend = sum(quarterWeekly(quarter).filter((row) => row.month === month), "spend");
+    return weeklySpend || fallback || 0;
+  }
+  const channelSpend = sum(quarterChannels(quarter), "spend");
+  if (channelSpend) return channelSpend;
+  const weeklySpend = sum(quarterWeekly(quarter), "spend");
+  return weeklySpend || fallback || 0;
 }
 
 function quarterChannels(quarter = state.quarter) {
@@ -283,6 +307,7 @@ function enrichData(data) {
   data.manual.airtable.leadTableId ||= "tblKmMJaP7SPnZMwg";
   data.manual.sync ||= {};
   data.manual.sync.airtableEndpoint ||= defaultAirtableEndpoint();
+  data.manual.sync.activityEndpoint ||= defaultActivityEndpoint();
   data.manual.lastUploads ||= {};
   data.manual.connections ||= {};
   data.manual.socialPostCounts ||= [];
@@ -302,7 +327,64 @@ function enrichData(data) {
   data.metaAds = normalizeMetaAds(data);
   data.seoReport = normalizeSeoReport(data);
   data.googleBusiness = normalizeGoogleBusiness(data);
+  data.quarters = ensureQuarterRows(data);
   return data;
+}
+
+function ensureQuarterRows(data) {
+  const existingRows = data.quarters || [];
+  const existing = new Map(existingRows.map((row) => [row.quarter, row]));
+  collectKnownQuarters(data).forEach((quarter) => {
+    if (!quarter || existing.has(quarter)) return;
+    existing.set(quarter, buildQuarterSummary(data, quarter));
+  });
+  return [...existing.values()].sort((a, b) => quarterRank(a.quarter) - quarterRank(b.quarter));
+}
+
+function collectKnownQuarters(data) {
+  const quarters = new Set();
+  const add = (value) => {
+    if (/^Q[1-4]\s+\d{4}$/.test(String(value || "").trim())) quarters.add(String(value).trim());
+  };
+  [
+    ...(data.quarters || []),
+    ...(data.channelQuarterly || []),
+    ...(data.channelWeekly || []),
+    ...(data.weeks || []),
+    ...(data.socialPlatforms || []),
+    ...(data.metaAds || []),
+    ...(data.seoReport || []),
+    ...(data.googleBusiness || []),
+    ...(data.leadSummary?.monthly || []),
+    ...(data.leadSummary?.channelPeriods || []),
+    ...(data.leadSummary?.statusPeriods || []),
+    ...(data.leadSummary?.leadRecords || []),
+    ...(data.leadSummary?.wonDeals || []),
+  ].forEach((row) => add(row?.quarter));
+  return [...quarters];
+}
+
+function buildQuarterSummary(data, quarter) {
+  const leadRows = (data.leadSummary?.monthly || []).filter((row) => row.quarter === quarter);
+  const channelRows = (data.channelQuarterly || []).filter((row) => row.quarter === quarter);
+  const weeklyRows = (data.channelWeekly || []).filter((row) => row.quarter === quarter);
+  const spend = sum(channelRows, "spend") || sum(weeklyRows, "spend");
+  const leads = sum(leadRows, "leads") || sum(channelRows, "leads");
+  const qualified = sum(leadRows, "qualified") || sum(channelRows, "qualified");
+  const won = sum(leadRows, "won") || sum(channelRows, "won");
+  const revenue = sum(leadRows, "revenue") || sum(channelRows, "revenue");
+  return {
+    quarter,
+    spend,
+    leads,
+    qualified,
+    cpql: safeRatio(spend, qualified),
+    won,
+    cpa: safeRatio(spend, won),
+    winRate: safeRatio(won, qualified) * 100,
+    revenue,
+    roas: safeRatio(revenue, spend),
+  };
 }
 
 function quarterSeed(quarter) {
@@ -855,6 +937,8 @@ function render() {
   `;
   bindBaseEvents();
   if (state.view === "admin") bindAdminEvents();
+  if (state.role === "ceo") logCeoView();
+  if (state.role === "admin" && state.view === "admin" && !state.activityHistoryLoaded) fetchActivityHistory({ silent: true });
 }
 
 function renderLogin() {
@@ -1075,27 +1159,30 @@ function overviewMetrics(quarter = state.quarter, month = activeMonth()) {
   const marketingLeads = Math.max(0, totalLeads - referralLeads);
   if (month === "All months") {
     const q = findQuarter(quarter);
+    const resolvedWon = pipeline.won || q.won || 0;
+    const resolvedQualified = pipeline.qualified || q.qualified || 0;
+    const spend = periodSpend(quarter, "All months", q.spend || 0);
     return {
       quarter,
-      spend: q.spend || 0,
+      spend,
       leads: marketingLeads || q.leads || 0,
       referralLeads,
       totalLeads,
-      qualified: pipeline.qualified || q.qualified || 0,
-      totalQualified: pipeline.qualified || q.qualified || 0,
+      qualified: resolvedQualified,
+      totalQualified: resolvedQualified,
       inProgress: pipeline.inProgress || 0,
       lost: pipeline.lost || 0,
-      won: pipeline.won || q.won || 0,
+      won: resolvedWon,
       revenue: pipeline.revenue || q.revenue || 0,
       pipelineValue: pipeline.pipelineValue || 0,
-      cpql: safeRatio(q.spend || 0, pipeline.qualified || q.qualified || 0),
-      cpa: q.cpa || safeRatio(q.spend || 0, pipeline.won || q.won || 0),
-      winRate: safeRatio(pipeline.won || q.won || 0, pipeline.qualified || q.qualified || 0) * 100,
+      cpql: safeRatio(spend, resolvedQualified),
+      cpa: safeRatio(spend, resolvedWon),
+      winRate: safeRatio(resolvedWon, resolvedQualified) * 100,
     };
   }
   const weeks = quarterWeeks(quarter).filter((row) => row.month === month);
   const channels = channelMetricsFor(quarter, month);
-  const spend = sum(channels, "spend");
+  const spend = periodSpend(quarter, month, sum(channels, "spend"));
   const leads = sum(weeks, "leads") || sum(channels, "leads");
   const qualified = sum(weeks, "qualified") || sum(channels, "qualified");
   const won = sum(weeks, "won") || sum(channels, "won");
@@ -1406,13 +1493,14 @@ function renderOverviewView() {
       ${metricCard("CPQL", formatMoney(q.cpql, true), "Cost per qualified lead.", q.cpql, previous?.cpql)}
       ${metricCard("CPA", formatMoney(q.cpa, true), "Cost per acquisition or won deal.", q.cpa, previous?.cpa)}
     </section>
-    ${state.compareEnabled ? renderOverviewInlineCompare(q, compare) : ""}
-    ${renderQuarterlySummaryPanel()}
-    <section class="grid-2 equal-grid">
-      ${renderWonDealsPanel(wonDealsFor().slice(0, 8), "Closed Deal Log", selectedPeriodLabel())}
-      ${renderPipelinePanel(q)}
-    </section>
-    ${renderQuarterTable(channels)}
+    ${state.compareEnabled ? `${renderOverviewInlineCompare(q, compare)}${renderComparePeriodDetails()}` : `
+      ${renderQuarterlySummaryPanel()}
+      <section class="grid-2 equal-grid">
+        ${renderWonDealsPanel(wonDealsFor().slice(0, 8), "Closed Deal Log", selectedPeriodLabel())}
+        ${renderPipelinePanel(q)}
+      </section>
+    `}
+    ${state.compareEnabled ? "" : renderQuarterTable(channels)}
   `;
 }
 
@@ -1533,8 +1621,8 @@ function renderQuarterlySummaryPanel() {
   `;
 }
 
-function periodSummaryRows() {
-  if (isOverallPeriod()) {
+function periodSummaryRows(quarter = state.quarter, month = activeMonth()) {
+  if (isOverallPeriod(quarter)) {
     return {
       title: "Period Performance Trend",
       label: "All periods",
@@ -1543,10 +1631,10 @@ function periodSummaryRows() {
         .map((row) => ({ ...overviewMetrics(row.quarter, "All months"), period: row.quarter, isCurrent: row.quarter === uniqueQuarters()[0] })),
     };
   }
-  if (state.granularity === "Monthly" && state.month !== "All months") {
-    const weeklySpend = groupRows(quarterWeekly(state.quarter).filter((row) => row.month === state.month), "week");
-    const rows = quarterWeeks(state.quarter)
-      .filter((row) => row.month === state.month)
+  if (state.granularity === "Monthly" && month !== "All months") {
+    const weeklySpend = groupRows(quarterWeekly(quarter).filter((row) => row.month === month), "week");
+    const rows = quarterWeeks(quarter)
+      .filter((row) => row.month === month)
       .map((row) => {
         const spend = sum(weeklySpend[row.week] || [], "spend");
         return {
@@ -1559,11 +1647,11 @@ function periodSummaryRows() {
           winRate: safeRatio(row.won, row.qualified) * 100,
         };
       });
-    return { title: "Period Performance Trend", label: state.month, rows };
+    return { title: "Period Performance Trend", label: month, rows };
   }
-  const rows = monthlyRows(state.quarter).map((row) => {
-    const channels = channelMetricsFor(state.quarter, row.month);
-    const leadMetrics = leadPipelineMetrics(state.quarter, row.month);
+  const rows = monthlyRows(quarter).map((row) => {
+    const channels = channelMetricsFor(quarter, row.month);
+    const leadMetrics = leadPipelineMetrics(quarter, row.month);
     return {
       period: row.month,
       leads: leadMetrics.leads || row.leads,
@@ -1574,7 +1662,7 @@ function periodSummaryRows() {
       winRate: safeRatio(leadMetrics.won || row.won, leadMetrics.qualified || row.qualified) * 100,
     };
   });
-  return { title: "Period Performance Trend", label: state.quarter, rows };
+  return { title: "Period Performance Trend", label: quarter, rows };
 }
 
 function renderSourcePerformancePanel(rows, title, label) {
@@ -1622,11 +1710,11 @@ function renderWonDealsPanel(rows, title = "Closed Deal Log", label = "closed de
   `;
 }
 
-function renderPipelinePanel(metrics = overviewMetrics()) {
+function renderPipelinePanel(metrics = overviewMetrics(), quarter = state.quarter, month = activeMonth(), label = selectedPeriodLabel(quarter, month)) {
   return `
     <article class="executive-panel compact-executive">
-      <div class="panel-header"><h3>Lead Pipeline Flow</h3><span class="fine-print">${escapeHtml(selectedPeriodLabel())} · ${formatNumber(metrics.totalLeads)} total</span></div>
-      ${leadFlowChart(leadStatusRows(), metrics)}
+      <div class="panel-header"><h3>Lead Pipeline Flow</h3><span class="fine-print">${escapeHtml(label)} · ${formatNumber(metrics.totalLeads)} total</span></div>
+      ${leadFlowChart(leadStatusRows(quarter, month), metrics)}
     </article>
   `;
 }
@@ -1723,10 +1811,10 @@ function wonDealsFor(quarter = state.quarter, month = activeMonth()) {
     .sort((a, b) => String(b.date || "").localeCompare(String(a.date || "")));
 }
 
-function renderQuarterTable(rows) {
+function renderQuarterTable(rows, label = selectedPeriodLabel()) {
   return `
     <section class="panel">
-      <div class="panel-header"><h3>Lead Source Overview</h3><span class="fine-print">${escapeHtml(selectedPeriodLabel())}</span></div>
+      <div class="panel-header"><h3>Lead Source Overview</h3><span class="fine-print">${escapeHtml(label)}</span></div>
       <div class="table-wrap">
         <table>
           <thead><tr><th>Channel</th><th>Spend</th><th>Leads</th><th>Qualified</th><th>Unqualified</th><th>CPQL</th><th>Won</th><th>Revenue</th><th>ROAS</th></tr></thead>
@@ -1793,6 +1881,51 @@ function renderCompareView() {
       ${renderCompareMetricPanel("SEO", { ...seoLeft, gbpActions: gbpLeft.calls + gbpLeft.bookings + gbpLeft.directionRequests + gbpLeft.websiteClicks }, { ...seoRight, gbpActions: gbpRight.calls + gbpRight.bookings + gbpRight.directionRequests + gbpRight.websiteClicks }, [["Clicks", "clicks", "number"], ["Impressions", "impressions", "number"], ["Average CTR", "ctr", "pct"], ["Avg. position", "avgPosition", "number"], ["GBP actions", "gbpActions", "number"]])}
       ${renderCompareMetricPanel("Leads", left, right, [["CPQL", "cpql", "money"], ["Qualified", "totalQualified", "number"], ["In progress", "inProgress", "number"], ["Won deals", "won", "number"], ["Revenue won", "revenue", "money"], ["Pipeline value", "pipelineValue", "money"]])}
     </section>
+    ${renderComparePeriodDetails()}
+  `;
+}
+
+function renderComparePeriodDetails() {
+  const leftLabel = selectedPeriodLabel(state.quarter, activeMonth());
+  const rightLabel = selectedPeriodLabel(state.compareQuarter, activeCompareMonth());
+  const leftSummary = periodSummaryRows(state.quarter, activeMonth());
+  const rightSummary = periodSummaryRows(state.compareQuarter, activeCompareMonth());
+  const leftMetrics = overviewMetrics(state.quarter, activeMonth());
+  const rightMetrics = overviewMetrics(state.compareQuarter, activeCompareMonth());
+  return `
+    <section class="grid-2 equal-grid compare-detail-grid">
+      ${renderCompareTrendPanel(leftSummary, leftLabel)}
+      ${renderCompareTrendPanel(rightSummary, rightLabel)}
+    </section>
+    <section class="grid-2 equal-grid compare-detail-grid">
+      ${renderWonDealsPanel(wonDealsFor(state.quarter, activeMonth()).slice(0, 8), "Closed Deal Log", leftLabel)}
+      ${renderWonDealsPanel(wonDealsFor(state.compareQuarter, activeCompareMonth()).slice(0, 8), "Closed Deal Log", rightLabel)}
+    </section>
+    <section class="grid-2 equal-grid compare-detail-grid">
+      ${renderPipelinePanel(leftMetrics, state.quarter, activeMonth(), leftLabel)}
+      ${renderPipelinePanel(rightMetrics, state.compareQuarter, activeCompareMonth(), rightLabel)}
+    </section>
+    <section class="grid-2 equal-grid compare-detail-grid">
+      ${renderQuarterTable(overviewChannelDetailRows(state.quarter, activeMonth()), leftLabel)}
+      ${renderQuarterTable(overviewChannelDetailRows(state.compareQuarter, activeCompareMonth()), rightLabel)}
+    </section>
+  `;
+}
+
+function renderCompareTrendPanel(summary, label) {
+  return `
+    <article class="executive-panel compare-trend-panel">
+      <div class="panel-header"><h3>Period Trend</h3><span class="fine-print">${escapeHtml(label)}</span></div>
+      <div class="executive-chart">${quarterlyComboChart(summary.rows)}</div>
+      <div class="executive-table-wrap compact-table">
+        <table class="executive-table period-table">
+          <thead><tr><th>Period</th><th>Qualified</th><th>Spend</th><th>Revenue</th><th>Won</th></tr></thead>
+          <tbody>
+            ${summary.rows.map((row) => `<tr><td><strong>${escapeHtml(row.period || row.quarter)}</strong></td><td>${formatNumber(row.qualified)}</td><td>${formatMoney(row.spend)}</td><td class="money-cell">${formatMoney(row.revenue)}</td><td>${formatNumber(row.won)}</td></tr>`).join("")}
+          </tbody>
+        </table>
+      </div>
+    </article>
   `;
 }
 
@@ -2115,14 +2248,15 @@ function renderSocialView() {
       ${metricCard("Engagements", formatNumber(totals.engagements), "Reactions, comments, shares, and saves.", totals.engagements)}
       ${showLinkClicks ? metricCard("Link clicks", formatNumber(totals.linkClicks), "Clicks from social content to owned destinations.", totals.linkClicks) : ""}
     </section>
-    ${state.compareEnabled ? renderSocialCompareRows(rows, compareRows) : ""}
-    <section class="grid-2">
-      ${rows.map((row) => renderSocialGraphPanel(row)).join("")}
-    </section>
-    <section class="panel">
-      <div class="panel-header"><h3>Channel Performance Table</h3></div>
-      ${renderSocialTable(rows)}
-    </section>
+    ${state.compareEnabled ? renderSocialCompareRows(rows, compareRows) : `
+      <section class="grid-2">
+        ${rows.map((row) => renderSocialGraphPanel(row)).join("")}
+      </section>
+      <section class="panel">
+        <div class="panel-header"><h3>Channel Performance Table</h3></div>
+        ${renderSocialTable(rows)}
+      </section>
+    `}
   `;
 }
 
@@ -2148,7 +2282,50 @@ function renderSocialCompareRows(rows, compareRows) {
       <div class="panel-header"><h3>Social Comparison</h3><span class="badge">${escapeHtml(state.granularity === "Monthly" ? activeCompareMonth() : state.compareQuarter)}</span></div>
       ${renderDeltaGrid(current, compare, metrics)}
     </section>
+    ${renderSocialCompareDetails(rows, compareRows)}
   `;
+}
+
+function renderSocialCompareDetails(rows, compareRows) {
+  const currentLabel = selectedPeriodLabel(state.quarter, activeMonth());
+  const compareLabel = selectedPeriodLabel(state.compareQuarter, activeCompareMonth());
+  return `
+    <section class="grid-2 equal-grid compare-detail-grid">
+      ${renderSocialTrendPanel(rows, currentLabel)}
+      ${renderSocialTrendPanel(compareRows, compareLabel)}
+    </section>
+    <section class="grid-2 equal-grid compare-detail-grid">
+      ${renderSocialTablePanel(rows, currentLabel)}
+      ${renderSocialTablePanel(compareRows, compareLabel)}
+    </section>
+  `;
+}
+
+function renderSocialTrendPanel(rows, label) {
+  const timeline = aggregateSocialTimeline(rows);
+  const totals = socialTotals(rows);
+  return `
+    <article class="panel">
+      <div class="panel-header"><h3>Social Trend</h3><span class="fine-print">${escapeHtml(label)}</span></div>
+      ${metricHeaderRow([["Views", totals.views], ["Reach", totals.reach], ["Engagements", totals.engagements], ["Link clicks", totals.linkClicks]])}
+      <div class="chart-wrap">${dualAxisLineChart(timeline, "label", "contentViews", "reach", { firstLabel: "Content views", secondLabel: "Reach", firstType: "number", secondType: "number", height: 300 })}</div>
+    </article>
+  `;
+}
+
+function aggregateSocialTimeline(rows) {
+  const map = new Map();
+  rows.forEach((row) => {
+    (row.series || []).forEach((point) => {
+      const key = point.date || point.label;
+      if (!key) return;
+      const existing = map.get(key) || { date: point.date || key, label: point.label || shortDate(point.date), contentViews: 0, reach: 0 };
+      existing.contentViews += parseNumber(point.contentViews);
+      existing.reach += parseNumber(point.reach);
+      map.set(key, existing);
+    });
+  });
+  return [...map.values()].sort((a, b) => String(a.date || "").localeCompare(String(b.date || "")));
 }
 
 function socialRows(quarter = state.quarter, month = activeMonth(), ignorePlatform = false) {
@@ -2250,6 +2427,15 @@ function renderSocialTable(rows) {
   `;
 }
 
+function renderSocialTablePanel(rows, label) {
+  return `
+    <section class="panel">
+      <div class="panel-header"><h3>Channel Performance Table</h3><span class="fine-print">${escapeHtml(label)}</span></div>
+      ${renderSocialTable(rows)}
+    </section>
+  `;
+}
+
 function renderMetaView() {
   const meta = metaForPeriod();
   const previous = state.compareEnabled
@@ -2278,24 +2464,45 @@ function renderMetaView() {
       ${metricCard("CPC", formatMoney(meta.cpc, true), "Cost per link click.", meta.cpc)}
       ${metricCard("CTR", formatPct(meta.ctr, 2), "Link click-through rate.", meta.ctr)}
     </section>
-    <section class="grid-2">
-      ${renderMetaTrendPanel("Impressions & CPM", meta, "impressions", "cpm", "Impressions", "CPM")}
-      ${renderMetaTrendPanel("Clicks & CPC", meta, "linkClicks", "cpc", "Link clicks", "CPC")}
-      ${renderMetaLeadEfficiencyPanel(meta)}
-      <article class="panel">
-        <div class="panel-header"><h3>Lead Quality</h3><span class="badge">Meta Ads</span></div>
-        <div class="quality-grid">
-          ${qualityBar("Total leads", meta.leads, meta.leads)}
-          ${qualityBar("Qualified leads", meta.qualified, meta.leads)}
-          ${qualityBar("Unqualified leads", meta.unqualified, meta.leads)}
-          <p><strong>${formatMoney(meta.cpql, true)}</strong> cost per qualified lead</p>
-        </div>
-      </article>
-    </section>
     <section class="panel">
       <div class="panel-header"><h3>Meta Ads Comparison</h3><span class="badge">${escapeHtml(state.compareEnabled ? "Selected comparison" : `Previous ${state.granularity.toLowerCase()} period`)}</span></div>
       ${differenceRows(meta, previous, diffMetrics)}
     </section>
+    ${state.compareEnabled ? renderMetaCompareDetails(meta, previous) : `
+      <section class="grid-2">
+        ${renderMetaTrendPanel("Impressions & CPM", meta, "impressions", "cpm", "Impressions", "CPM")}
+        ${renderMetaTrendPanel("Clicks & CPC", meta, "linkClicks", "cpc", "Link clicks", "CPC")}
+        ${renderMetaLeadEfficiencyPanel(meta)}
+        ${renderMetaQualityPanel(meta, "Meta Ads")}
+      </section>
+    `}
+  `;
+}
+
+function renderMetaCompareDetails(current, compare) {
+  return `
+    <section class="grid-2 equal-grid compare-detail-grid">
+      ${renderMetaCompareTrendPanel(current, selectedPeriodLabel(state.quarter, activeMonth()))}
+      ${renderMetaCompareTrendPanel(compare, selectedPeriodLabel(state.compareQuarter, activeCompareMonth()))}
+    </section>
+    <section class="grid-2 equal-grid compare-detail-grid">
+      ${renderMetaLeadEfficiencyPanel(current, state.quarter, activeMonth(), selectedPeriodLabel(state.quarter, activeMonth()))}
+      ${renderMetaLeadEfficiencyPanel(compare, state.compareQuarter, activeCompareMonth(), selectedPeriodLabel(state.compareQuarter, activeCompareMonth()))}
+    </section>
+    <section class="grid-2 equal-grid compare-detail-grid">
+      ${renderMetaQualityPanel(current, selectedPeriodLabel(state.quarter, activeMonth()))}
+      ${renderMetaQualityPanel(compare, selectedPeriodLabel(state.compareQuarter, activeCompareMonth()))}
+    </section>
+  `;
+}
+
+function renderMetaCompareTrendPanel(meta, label) {
+  return `
+    <article class="panel">
+      <div class="panel-header"><h3>Meta Trend</h3><span class="fine-print">${escapeHtml(label)}</span></div>
+      ${metricHeaderRow([["Spend", formatMoney(meta.amountSpent, true)], ["Impressions", meta.impressions], ["Clicks", meta.linkClicks], ["CTR", formatPct(meta.ctr, 2)]])}
+      <div class="chart-wrap">${dualAxisLineChart(meta.series || [], "label", "amountSpent", "linkClicks", { firstLabel: "Spend", secondLabel: "Link clicks", firstType: "money", secondType: "number", height: 300 })}</div>
+    </article>
   `;
 }
 
@@ -2315,8 +2522,8 @@ function renderMetaTrendPanel(title, meta, firstKey, secondKey, firstLabel, seco
   `;
 }
 
-function renderMetaLeadEfficiencyPanel(meta) {
-  const rows = metaLeadEfficiencyRows();
+function renderMetaLeadEfficiencyPanel(meta, quarter = state.quarter, month = activeMonth(), label = selectedPeriodLabel(quarter, month)) {
+  const rows = metaLeadEfficiencyRows(quarter, month);
   const metrics = [
     ["Spend", formatMoney(sum(rows, "amountSpent"), true)],
     ["Leads", sum(rows, "leads") || meta.leads],
@@ -2325,9 +2532,23 @@ function renderMetaLeadEfficiencyPanel(meta) {
   ];
   return `
     <article class="panel">
-      <div class="panel-header"><h3>Spend & Qualified Leads</h3><span class="badge">${escapeHtml(selectedPeriodLabel())}</span></div>
+      <div class="panel-header"><h3>Spend & Qualified Leads</h3><span class="badge">${escapeHtml(label)}</span></div>
       ${metricHeaderRow(metrics)}
       <div class="chart-wrap">${dualAxisLineChart(rows, "label", "amountSpent", "qualified", { firstLabel: "Spend", secondLabel: "Qualified", firstType: "money", secondType: "number", height: 300 })}</div>
+    </article>
+  `;
+}
+
+function renderMetaQualityPanel(meta, label = selectedPeriodLabel()) {
+  return `
+    <article class="panel">
+      <div class="panel-header"><h3>Lead Quality</h3><span class="badge">${escapeHtml(label)}</span></div>
+      <div class="quality-grid">
+        ${qualityBar("Total leads", meta.leads, meta.leads)}
+        ${qualityBar("Qualified leads", meta.qualified, meta.leads)}
+        ${qualityBar("Unqualified leads", meta.unqualified, meta.leads)}
+        <p><strong>${formatMoney(meta.cpql, true)}</strong> cost per qualified lead</p>
+      </div>
     </article>
   `;
 }
@@ -2380,24 +2601,16 @@ function renderSeoView() {
       ${metricCard("Avg. position", Number(seo.avgPosition || 0).toFixed(1), "Average keyword ranking position.", seo.avgPosition)}
       ${metricCard("GBP clicks", formatNumber(gbp.websiteClicks), "Website clicks from Google Business Profile.", gbp.websiteClicks)}
     </section>
-    ${state.compareEnabled ? `<section class="panel"><div class="panel-header"><h3>SEO Comparison</h3><span class="badge">Selected comparison</span></div>${differenceRows(seo, compareSeo, [["Clicks", "clicks", "number"], ["Impressions", "impressions", "number"], ["CTR", "ctr", "pct"], ["Avg. position", "avgPosition", "number"]])}</section>` : ""}
-    <section class="grid-2">
-      <article class="panel">
-        <div class="panel-header"><h3>Search Console Trend</h3></div>
-        <p class="definition">Impressions are shown as the line on the left axis. Clicks are shown as bars on the right axis.</p>
-        <div class="chart-wrap">${searchConsoleComboChart(seo.series || [], { height: 300 })}</div>
-      </article>
-      <article class="panel">
-        <div class="panel-header"><h3>Google Business Profile</h3></div>
-        <div class="metric-strip">
-          <div><span class="meta-label">Calls</span><strong>${formatNumber(gbp.calls)}</strong></div>
-          <div><span class="meta-label">Bookings</span><strong>${formatNumber(gbp.bookings)}</strong></div>
-          <div><span class="meta-label">Directions</span><strong>${formatNumber(gbp.directionRequests)}</strong></div>
-          <div><span class="meta-label">Website clicks</span><strong>${formatNumber(gbp.websiteClicks)}</strong></div>
-        </div>
-        <div class="chart-wrap">${lineChart(gbp.series || [], "label", "profileViews", "websiteClicks", { firstLabel: "Profile views", secondLabel: "Website clicks", height: 280 })}</div>
-      </article>
-    </section>
+    ${state.compareEnabled ? `<section class="panel"><div class="panel-header"><h3>SEO Comparison</h3><span class="badge">Selected comparison</span></div>${differenceRows(seo, compareSeo, [["Clicks", "clicks", "number"], ["Impressions", "impressions", "number"], ["CTR", "ctr", "pct"], ["Avg. position", "avgPosition", "number"]])}</section>${renderSeoCompareDetails(seo, compareSeo, gbp, gbpForPeriod(state.compareQuarter, activeCompareMonth()))}` : `
+      <section class="grid-2">
+        <article class="panel">
+          <div class="panel-header"><h3>Search Console Trend</h3></div>
+          <p class="definition">Impressions are shown as the line on the left axis. Clicks are shown as bars on the right axis.</p>
+          <div class="chart-wrap">${searchConsoleComboChart(seo.series || [], { height: 300 })}</div>
+        </article>
+        ${renderGbpPanel(gbp)}
+      </section>
+    `}
     <section class="panel">
       <div class="panel-header"><h3>Top Ranking Keywords</h3><span class="badge">Best positions</span></div>
       ${renderTopRankingKeywords(seo.keywordRows || [])}
@@ -2428,6 +2641,44 @@ function renderSeoView() {
       <div class="panel-header"><h3>Top Organic Pages</h3><span class="badge">Clicks, impressions, CTR, position</span></div>
       ${renderTopPagesTable(seo.topPages || [])}
     </section>
+  `;
+}
+
+function renderSeoCompareDetails(current, compare, currentGbp, compareGbp) {
+  return `
+    <section class="grid-2 equal-grid compare-detail-grid">
+      ${renderSeoCompareTrendPanel(current, selectedPeriodLabel(state.quarter, activeMonth()))}
+      ${renderSeoCompareTrendPanel(compare, selectedPeriodLabel(state.compareQuarter, activeCompareMonth()))}
+    </section>
+    <section class="grid-2 equal-grid compare-detail-grid">
+      ${renderGbpPanel(currentGbp, selectedPeriodLabel(state.quarter, activeMonth()))}
+      ${renderGbpPanel(compareGbp, selectedPeriodLabel(state.compareQuarter, activeCompareMonth()))}
+    </section>
+  `;
+}
+
+function renderGbpPanel(gbp, label = "Google Business Profile") {
+  return `
+    <article class="panel">
+      <div class="panel-header"><h3>Google Business Profile</h3><span class="fine-print">${escapeHtml(label)}</span></div>
+      <div class="metric-strip">
+        <div><span class="meta-label">Calls</span><strong>${formatNumber(gbp.calls)}</strong></div>
+        <div><span class="meta-label">Bookings</span><strong>${formatNumber(gbp.bookings)}</strong></div>
+        <div><span class="meta-label">Directions</span><strong>${formatNumber(gbp.directionRequests)}</strong></div>
+        <div><span class="meta-label">Website clicks</span><strong>${formatNumber(gbp.websiteClicks)}</strong></div>
+      </div>
+      <div class="chart-wrap">${lineChart(gbp.series || [], "label", "profileViews", "websiteClicks", { firstLabel: "Profile views", secondLabel: "Website clicks", height: 280 })}</div>
+    </article>
+  `;
+}
+
+function renderSeoCompareTrendPanel(seo, label) {
+  return `
+    <article class="panel">
+      <div class="panel-header"><h3>Search Console Trend</h3><span class="fine-print">${escapeHtml(label)}</span></div>
+      ${metricHeaderRow([["Clicks", seo.clicks], ["Impressions", seo.impressions], ["CTR", formatPct(seo.ctr, 2)], ["Avg. position", Number(seo.avgPosition || 0).toFixed(1)]])}
+      <div class="chart-wrap">${searchConsoleComboChart(seo.series || [], { height: 300 })}</div>
+    </article>
   `;
 }
 
@@ -2587,32 +2838,39 @@ function renderLeadsView() {
       ${metricCard("CPA", formatMoney(q.cpa, true), "Cost per acquisition or won deal.", q.cpa, previous?.cpa)}
       ${metricCard("Pipeline value", formatMoney(q.pipelineValue), "Estimated value of qualified leads still in progress.", q.pipelineValue, previous?.pipelineValue)}
     </section>
-    ${state.compareEnabled ? `<section class="panel section"><div class="panel-header"><h3>Pipeline Comparison</h3><span class="badge">${escapeHtml(state.granularity === "Monthly" ? activeCompareMonth() : state.compareQuarter)}</span></div>${renderDeltaGrid(q, previous, [["Total leads", "totalLeads", "number"], ["Qualified leads", "totalQualified", "number"], ["In progress", "inProgress", "number"], ["Won deals", "won", "number"], ["CPA", "cpa", "money"], ["Pipeline value", "pipelineValue", "money"], ["Revenue won", "revenue", "money"]])}</section>` : ""}
-    <section class="grid-2 equal-grid">
-      ${renderPipelinePanel(q)}
-      ${renderWonDealsPanel(wonDeals, "Closed Deal Log", "Closed deals")}
+    ${state.compareEnabled ? `<section class="panel section"><div class="panel-header"><h3>Pipeline Comparison</h3><span class="badge">${escapeHtml(state.granularity === "Monthly" ? activeCompareMonth() : state.compareQuarter)}</span></div>${renderDeltaGrid(q, previous, [["Total leads", "totalLeads", "number"], ["Qualified leads", "totalQualified", "number"], ["In progress", "inProgress", "number"], ["Won deals", "won", "number"], ["CPA", "cpa", "money"], ["Pipeline value", "pipelineValue", "money"], ["Revenue won", "revenue", "money"]])}</section>${renderComparePeriodDetails()}${renderLeadCompareTables()}` : `
+      <section class="grid-2 equal-grid">
+        ${renderPipelinePanel(q)}
+        ${renderWonDealsPanel(wonDeals, "Closed Deal Log", "Closed deals")}
+      </section>
+      ${renderLeadStatusNameTable()}
+      ${renderLeadChannelSummaryPanel(leadChannels)}
+    `}
+  `;
+}
+
+function renderLeadCompareTables() {
+  const leftLabel = selectedPeriodLabel(state.quarter, activeMonth());
+  const rightLabel = selectedPeriodLabel(state.compareQuarter, activeCompareMonth());
+  return `
+    <section class="grid-2 equal-grid compare-detail-grid">
+      ${renderLeadStatusNameTableFor(state.quarter, activeMonth(), leftLabel)}
+      ${renderLeadStatusNameTableFor(state.compareQuarter, activeCompareMonth(), rightLabel)}
     </section>
-    ${renderLeadStatusNameTable()}
-    <section class="panel">
-      <div class="panel-header"><h3>Lead Channel Summary</h3></div>
-      <div class="table-wrap">
-        <table>
-          <thead><tr><th>Channel</th><th>Leads</th><th>Qualified</th><th>In progress</th><th>Won</th><th>Pipeline value</th><th>Revenue</th></tr></thead>
-          <tbody>${leadChannels
-            .map(
-              (row) =>
-                `<tr><td><strong>${escapeHtml(row.channel)}</strong></td><td>${formatNumber(row.leads)}</td><td>${formatNumber(row.qualified)}</td><td>${formatNumber(row.inProgress)}</td><td>${formatNumber(row.won)}</td><td>${formatMoney(row.pipelineValue)}</td><td>${formatMoney(row.revenue)}</td></tr>`,
-            )
-            .join("")}</tbody>
-        </table>
-      </div>
+    <section class="grid-2 equal-grid compare-detail-grid">
+      ${renderLeadChannelSummaryPanel(leadChannelRows(state.quarter, activeMonth()), leftLabel)}
+      ${renderLeadChannelSummaryPanel(leadChannelRows(state.compareQuarter, activeCompareMonth()), rightLabel)}
     </section>
   `;
 }
 
 function renderLeadStatusNameTable() {
-  const grouped = groupRows(leadRecordsFor(), "status");
-  const fallbackWon = wonDealsFor().map((deal) => ({ name: deal.client, source: deal.source, revenue: deal.revenue }));
+  return renderLeadStatusNameTableFor(state.quarter, activeMonth(), selectedPeriodLabel());
+}
+
+function renderLeadStatusNameTableFor(quarter = state.quarter, month = activeMonth(), label = selectedPeriodLabel(quarter, month)) {
+  const grouped = groupRows(leadRecordsFor(quarter, month), "status");
+  const fallbackWon = wonDealsFor(quarter, month).map((deal) => ({ name: deal.client, source: deal.source, revenue: deal.revenue }));
   const columns = LEAD_NAME_COLUMNS.map((status) => {
     const rows = grouped[status] || (status === "Won" ? fallbackWon : []);
     return { status, rows };
@@ -2620,7 +2878,7 @@ function renderLeadStatusNameTable() {
   const maxRows = Math.max(1, ...columns.map((column) => column.rows.length));
   return `
     <section class="panel lead-name-panel">
-      <div class="panel-header"><h3>Active Lead Names by Status</h3><span class="fine-print">${escapeHtml(selectedPeriodLabel())}</span></div>
+      <div class="panel-header"><h3>Active Lead Names by Status</h3><span class="fine-print">${escapeHtml(label)}</span></div>
       <div class="lead-name-grid" style="--lead-status-count:${columns.length}">
         ${columns.map((column) => `
           <article class="lead-name-column">
@@ -2631,6 +2889,25 @@ function renderLeadStatusNameTable() {
             }).join("")}
           </article>
         `).join("")}
+      </div>
+    </section>
+  `;
+}
+
+function renderLeadChannelSummaryPanel(rows, label = selectedPeriodLabel()) {
+  return `
+    <section class="panel">
+      <div class="panel-header"><h3>Lead Channel Summary</h3><span class="fine-print">${escapeHtml(label)}</span></div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Channel</th><th>Leads</th><th>Qualified</th><th>In progress</th><th>Won</th><th>Pipeline value</th><th>Revenue</th></tr></thead>
+          <tbody>${rows
+            .map(
+              (row) =>
+                `<tr><td><strong>${escapeHtml(row.channel)}</strong></td><td>${formatNumber(row.leads)}</td><td>${formatNumber(row.qualified)}</td><td>${formatNumber(row.inProgress)}</td><td>${formatNumber(row.won)}</td><td>${formatMoney(row.pipelineValue)}</td><td>${formatMoney(row.revenue)}</td></tr>`,
+            )
+            .join("")}</tbody>
+        </table>
       </div>
     </section>
   `;
@@ -2710,6 +2987,7 @@ function renderAdminView() {
           </div>
         </article>
         ${renderUploadReminderPanel()}
+        ${renderActivityHistoryPanel()}
         <article class="admin-card">
           <h3>Airtable Sync</h3>
           <p>Connect overview and leads through a secure sync endpoint. The Airtable token belongs in the endpoint, not in this dashboard file.</p>
@@ -2897,6 +3175,33 @@ function textArea(id, label, value = "") {
   return `<label class="wide"><span class="meta-label">${escapeHtml(label)}</span><textarea id="${id}">${escapeHtml(value)}</textarea></label>`;
 }
 
+function renderActivityHistoryPanel() {
+  return `
+    <article class="admin-card activity-card">
+      <div class="admin-row"><h3>Executive View History</h3><span class="badge">${formatNumber(state.activityHistory.length)} recent</span></div>
+      <p>Recent dashboard views recorded from the live Vercel site.</p>
+      <div class="activity-list">
+        ${state.activityHistory.length
+          ? state.activityHistory.slice(0, 12).map((row) => `
+            <div class="activity-row">
+              <strong>${escapeHtml(row.view || "Dashboard")}</strong>
+              <span>${escapeHtml(row.period || row.quarter || "")}${row.granularity ? ` · ${escapeHtml(row.granularity)}` : ""}</span>
+              <small>${escapeHtml(formatActivityTime(row.timestamp))}</small>
+            </div>
+          `).join("")
+          : `<p class="fine-print">No CEO view history has been recorded yet.</p>`}
+      </div>
+      <button type="button" class="utility-button" data-refresh-activity>Refresh history</button>
+    </article>
+  `;
+}
+
+function formatActivityTime(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value || "";
+  return date.toLocaleString("en-CA", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+}
+
 function renderUploadReminderPanel() {
   const items = [
     ["overviewLeads", "Overview & leads", "Airtable sync or leads/overview CSV"],
@@ -3033,6 +3338,7 @@ function bindAdminEvents() {
   document.querySelector("[data-add-seo-post]")?.addEventListener("click", saveSeoPostRow);
   document.querySelector("[data-add-gbp-manual]")?.addEventListener("click", saveGbpManualRow);
   document.querySelector("[data-save-targets]")?.addEventListener("click", saveTargets);
+  document.querySelector("[data-refresh-activity]")?.addEventListener("click", () => fetchActivityHistory({ silent: false }));
   document.querySelectorAll("[data-save-connections]").forEach((button) => button.addEventListener("click", saveConnectionFields));
   document.querySelector("[data-export-json]")?.addEventListener("click", exportJson);
   document.querySelector("[data-reset-local]")?.addEventListener("click", resetLocalEdits);
@@ -3152,6 +3458,7 @@ function saveTargets() {
 function saveConnectionFields() {
   state.data.manual.sync ||= {};
   state.data.manual.sync.airtableEndpoint = inputValue("airtableSyncEndpoint");
+  state.data.manual.sync.activityEndpoint ||= defaultActivityEndpoint();
   state.data.manual.airtable = {
     enabled: Boolean(inputValue("airtableBase")),
     baseId: inputValue("airtableBase"),
@@ -3200,6 +3507,73 @@ async function refreshAirtableFromEndpoint({ endpoint = state.data.manual.sync?.
   } catch (error) {
     if (!silent) showToast(`Airtable sync needs a reachable backend endpoint. ${error.message}`);
   }
+}
+
+async function logCeoView() {
+  const endpoint = state.data.manual.sync?.activityEndpoint || defaultActivityEndpoint();
+  if (!endpoint) return;
+  const key = [
+    state.view,
+    selectedPeriodLabel(),
+    state.granularity,
+    state.platform,
+    state.channel,
+    state.compareQuarter,
+    activeCompareMonth(),
+  ].join("|");
+  if (state.lastLoggedActivityKey === key) return;
+  state.lastLoggedActivityKey = key;
+  try {
+    await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify({
+        role: "CEO",
+        view: activeViewLabel(),
+        period: selectedPeriodLabel(),
+        quarter: state.quarter,
+        month: activeMonth(),
+        granularity: state.granularity,
+        platform: state.platform,
+        channel: state.channel,
+        path: window.location.href,
+        userAgent: navigator.userAgent,
+      }),
+    });
+  } catch {
+    // Activity logging is optional and should never interrupt dashboard viewing.
+  }
+}
+
+async function fetchActivityHistory({ silent = false } = {}) {
+  const endpoint = state.data.manual.sync?.activityEndpoint || defaultActivityEndpoint();
+  if (!endpoint) return;
+  try {
+    const response = await fetch(endpoint, { headers: { Accept: "application/json" } });
+    if (!response.ok) throw new Error(`History fetch failed with status ${response.status}`);
+    const payload = await response.json();
+    state.activityHistory = Array.isArray(payload.history) ? payload.history : [];
+    state.activityHistoryLoaded = true;
+    render();
+    if (!silent) showToast("CEO view history refreshed.");
+  } catch (error) {
+    state.activityHistoryLoaded = true;
+    if (!silent) showToast(`View history needs the Vercel activity endpoint. ${error.message}`);
+  }
+}
+
+function activeViewLabel() {
+  const labels = {
+    overview: "Overview",
+    compare: "Compare",
+    social: "Social",
+    meta: "Meta Ads",
+    seo: "SEO",
+    leads: "Leads",
+    weekly: "Weekly",
+    admin: "Admin",
+  };
+  return labels[state.view] || state.view;
 }
 
 function importSyncPayload(payload) {
@@ -3392,14 +3766,30 @@ function parseCsv(text) {
 
 function hasColumns(rows, columns) {
   if (!rows.length) return false;
-  const keys = Object.keys(rows[0]).map((key) => key.toLowerCase().trim());
-  return columns.every((column) => keys.includes(column));
+  const keys = Object.keys(rows[0]).map(normalizeColumnName);
+  return columns.every((column) => keys.includes(normalizeColumnName(column)));
+}
+
+function hasAnyColumn(rows, columns) {
+  if (!rows.length) return false;
+  const keys = Object.keys(rows[0]).map(normalizeColumnName);
+  return columns.some((column) => keys.includes(normalizeColumnName(column)));
+}
+
+function normalizeColumnName(value) {
+  return String(value || "")
+    .replace(/^\uFEFF/, "")
+    .replace(/&/g, " and ")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
 }
 
 function fieldValue(row, names) {
   const entries = Object.entries(row);
   for (const name of names) {
-    const found = entries.find(([key]) => key.toLowerCase().trim() === name.toLowerCase());
+    const normalizedName = normalizeColumnName(name);
+    const found = entries.find(([key]) => normalizeColumnName(key) === normalizedName);
     if (found) return found[1];
   }
   return "";
@@ -3594,61 +3984,61 @@ function importRows(rows) {
   if (hasColumns(rows, ["quarter", "date", "clicks", "impressions"])) {
     return mergeSeoRows(rows);
   }
-  if (hasColumns(rows, ["quarter", "channel quarterly record", "spend", "leads"])) {
+  if (hasColumns(rows, ["quarter", "spend", "leads"]) && hasAnyColumn(rows, ["revenue won", "won leads", "cpa"]) && !hasAnyColumn(rows, ["channel", "channel group"])) {
     state.data.quarters = rows.map((row) => ({
-      quarter: row.Quarter,
-      spend: parseNumber(row.Spend),
-      leads: parseNumber(row.Leads),
-      qualified: parseNumber(row["Qualified Leads"]),
-      cpql: parseNumber(row.CPQL),
-      won: parseNumber(row["Won Leads"]),
-      cpa: parseNumber(row.CPA),
-      winRate: parseNumber(row["Win Rate"]),
-      revenue: parseNumber(row["Revenue Won"]),
+      quarter: fieldValue(row, ["quarter"]),
+      spend: parseNumber(fieldValue(row, ["spend", "ad spend", "amount spent"])),
+      leads: parseNumber(fieldValue(row, ["leads", "total leads", "conversions/leads"])),
+      qualified: parseNumber(fieldValue(row, ["qualified leads", "qualified lead count"])),
+      cpql: parseNumber(fieldValue(row, ["cpql"])),
+      won: parseNumber(fieldValue(row, ["won leads", "won deals", "won"])),
+      cpa: parseNumber(fieldValue(row, ["cpa"])),
+      winRate: parseNumber(fieldValue(row, ["win rate"])),
+      revenue: parseNumber(fieldValue(row, ["revenue won", "closed revenue", "revenue"])),
     }));
     return "Quarterly performance updated.";
   }
-  if (hasColumns(rows, ["quarter", "channel", "weekly records", "qualified lead count"])) {
+  if (hasColumns(rows, ["quarter", "channel"]) && hasAnyColumn(rows, ["qualified lead count", "qualified leads"]) && hasAnyColumn(rows, ["spend", "revenue won", "leads"])) {
     state.data.channelQuarterly = rows.map((row) => ({
-      quarter: row.Quarter,
-      channel: row.Channel,
-      spend: parseNumber(row.Spend),
-      leads: parseNumber(row.Leads),
-      qualified: parseNumber(row["Qualified Lead Count"]),
-      cpql: parseNumber(row.CPQL),
-      won: parseNumber(row["Won Leads"]),
-      revenue: parseNumber(row["Revenue Won"]),
-      roas: parseNumber(row.ROAS),
+      quarter: fieldValue(row, ["quarter"]),
+      channel: fieldValue(row, ["channel", "channel group", "source"]),
+      spend: parseNumber(fieldValue(row, ["spend", "ad spend", "amount spent"])),
+      leads: parseNumber(fieldValue(row, ["leads", "total leads", "conversions/leads"])),
+      qualified: parseNumber(fieldValue(row, ["qualified lead count", "qualified leads"])),
+      cpql: parseNumber(fieldValue(row, ["cpql"])),
+      won: parseNumber(fieldValue(row, ["won leads", "won deals", "won"])),
+      revenue: parseNumber(fieldValue(row, ["revenue won", "closed revenue", "revenue"])),
+      roas: parseNumber(fieldValue(row, ["roas"])),
     }));
     return "Channel quarterly performance updated.";
   }
-  if (hasColumns(rows, ["week start", "channel", "conversions/leads", "qualified lead count"])) {
+  if (hasColumns(rows, ["week start", "channel"]) && hasAnyColumn(rows, ["conversions/leads", "leads", "total leads"]) && hasAnyColumn(rows, ["qualified lead count", "qualified leads"])) {
     state.data.channelWeekly = rows.map((row) => ({
-      week: toIsoDate(row["Week Start"]),
-      label: row.Name,
-      quarter: row.Quarter,
-      channel: row.Channel,
-      spend: parseNumber(row.Spend),
-      clicks: parseNumber(row.Clicks),
-      ctr: parseNumber(row.CTR),
-      leads: parseNumber(row["Conversions/Leads"]),
-      qualified: parseNumber(row["Qualified Lead Count"]),
-      won: parseNumber(row["Won Leads"]),
-      revenue: parseNumber(row["Revenue Won"]),
-      month: monthLabel(row["Week Start"]),
+      week: toIsoDate(fieldValue(row, ["week start", "week", "date"])),
+      label: fieldValue(row, ["name", "week range"]),
+      quarter: fieldValue(row, ["quarter"]),
+      channel: fieldValue(row, ["channel", "channel group", "source"]),
+      spend: parseNumber(fieldValue(row, ["spend", "ad spend", "amount spent"])),
+      clicks: parseNumber(fieldValue(row, ["clicks", "link clicks"])),
+      ctr: parseNumber(fieldValue(row, ["ctr"])),
+      leads: parseNumber(fieldValue(row, ["conversions/leads", "leads", "total leads"])),
+      qualified: parseNumber(fieldValue(row, ["qualified lead count", "qualified leads"])),
+      won: parseNumber(fieldValue(row, ["won leads", "won deals", "won"])),
+      revenue: parseNumber(fieldValue(row, ["revenue won", "closed revenue", "revenue"])),
+      month: monthLabel(fieldValue(row, ["week start", "week", "date"])),
     }));
     return "Weekly channel performance updated.";
   }
-  if (hasColumns(rows, ["week range", "total leads", "qualified leads"])) {
+  if (hasAnyColumn(rows, ["week range", "week start"]) && hasColumns(rows, ["total leads", "qualified leads"])) {
     state.data.weeks = rows.map((row) => ({
-      week: toIsoDate(row["Week Start"]),
-      range: row["Week Range"],
-      quarter: row.Quarter,
-      leads: parseNumber(row["Total Leads"]),
-      qualified: parseNumber(row["Qualified Leads"]),
-      won: parseNumber(row["Won Deals"]),
-      revenue: parseNumber(row["Revenue Won"]),
-      month: monthLabel(row["Week Start"]),
+      week: toIsoDate(fieldValue(row, ["week start", "week", "date"])),
+      range: fieldValue(row, ["week range", "name"]),
+      quarter: fieldValue(row, ["quarter"]),
+      leads: parseNumber(fieldValue(row, ["total leads", "leads"])),
+      qualified: parseNumber(fieldValue(row, ["qualified leads", "qualified lead count"])),
+      won: parseNumber(fieldValue(row, ["won deals", "won leads", "won"])),
+      revenue: parseNumber(fieldValue(row, ["revenue won", "closed revenue", "revenue"])),
+      month: monthLabel(fieldValue(row, ["week start", "week", "date"])),
     }));
     return "Weekly summary updated.";
   }
