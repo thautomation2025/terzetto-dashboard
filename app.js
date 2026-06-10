@@ -1,5 +1,5 @@
 const DATA_URL = "data/marketing-data.json";
-const STORAGE_KEY = "digitalMarketingDashboard:data:v13";
+const STORAGE_KEY = "digitalMarketingDashboard:data:v15";
 const AUTH_KEY = "digitalMarketingDashboard:authRole";
 const ADMIN_PASSWORD = "admin2026";
 const CEO_PASSWORD = "terzettoceo2026";
@@ -3007,7 +3007,7 @@ function renderAdminView() {
         <article class="admin-card">
           <h3>General CSV Upload</h3>
           <p>Upload one or multiple weekly, monthly, or quarterly CSV updates. Rows with the same date and source replace the stored row; new dates are added and rolled into monthly, quarterly, and overall reporting.</p>
-          <label class="drop-zone"><span class="meta-label">CSV upload</span><input id="csvUpload" type="file" accept=".csv,text/csv" multiple /></label>
+          <label class="drop-zone"><span class="meta-label">File upload</span><input id="csvUpload" type="file" accept=".csv,text/csv,.xlsx,.xls" multiple /></label>
           <p class="fine-print">Lead uploads are aggregated before saving; closed deal names, sources, revenue, and dates are retained for won-deal reporting.</p>
         </article>
         <article class="admin-card">
@@ -3050,7 +3050,7 @@ function renderAdminView() {
                 ${selectField("socialUploadPlatform", "Platform", ["Instagram", "Facebook", "TikTok", "YouTube"], "Instagram")}
                 ${selectField("socialUploadCadence", "Upload scope", ["Monthly", "Quarterly"], "Monthly")}
               </div>
-              <label class="drop-zone compact-drop"><span class="meta-label">Upload social CSV</span><input type="file" accept=".csv,text/csv" data-guided-upload="social" /></label>
+              <label class="drop-zone compact-drop"><span class="meta-label">Upload social CSV</span><input type="file" accept=".csv,text/csv,.xlsx,.xls" data-guided-upload="social" /></label>
             </div>
             <div class="guided-upload">
               <strong>Meta ads</strong>
@@ -3058,7 +3058,7 @@ function renderAdminView() {
                 ${selectField("metaUploadQuarter", "Quarter", quarterOptions, editableQuarter())}
                 ${selectField("metaUploadCadence", "Upload scope", ["Weekly", "Monthly", "Quarterly"], "Weekly")}
               </div>
-              <label class="drop-zone compact-drop"><span class="meta-label">Upload Meta CSV</span><input type="file" accept=".csv,text/csv" data-guided-upload="meta" /></label>
+              <label class="drop-zone compact-drop"><span class="meta-label">Upload Meta CSV</span><input type="file" accept=".csv,text/csv,.xlsx,.xls" data-guided-upload="meta" /></label>
             </div>
             <div class="guided-upload">
               <strong>SEO, keywords, GBP, Search Console</strong>
@@ -3068,7 +3068,7 @@ function renderAdminView() {
                 ${selectField("seoUploadType", "Report type", ["Google Search Console", "Keywords", "GBP", "Website posts"], "Google Search Console")}
                 ${selectField("seoUploadCadence", "Upload scope", ["Monthly", "Quarterly"], "Monthly")}
               </div>
-              <label class="drop-zone compact-drop"><span class="meta-label">Upload SEO CSV</span><input type="file" accept=".csv,text/csv" data-guided-upload="seo" /></label>
+              <label class="drop-zone compact-drop"><span class="meta-label">Upload SEO file</span><input type="file" accept=".csv,text/csv,.xlsx,.xls" data-guided-upload="seo" /></label>
             </div>
           </div>
         </article>
@@ -3550,7 +3550,16 @@ async function fetchActivityHistory({ silent = false } = {}) {
   if (!endpoint) return;
   try {
     const response = await fetch(endpoint, { headers: { Accept: "application/json" } });
-    if (!response.ok) throw new Error(`History fetch failed with status ${response.status}`);
+    if (!response.ok) {
+      let detail = "";
+      try {
+        const payload = await response.json();
+        detail = payload.error ? `: ${payload.error}` : "";
+      } catch {
+        detail = "";
+      }
+      throw new Error(`History fetch failed with status ${response.status}${detail}`);
+    }
     const payload = await response.json();
     state.activityHistory = Array.isArray(payload.history) ? payload.history : [];
     state.activityHistoryLoaded = true;
@@ -3670,42 +3679,58 @@ async function handleCsvUpload(event) {
   if (!files.length) return;
   const messages = [];
   for (const file of files) {
-    const rows = parseCsv(await file.text());
-    const message = importRows(rows);
-    messages.push(`${file.name}: ${message}`);
-    markUploadFromMessage(message);
+    try {
+      const tables = await parseUploadFile(file);
+      tables.forEach((rows) => {
+        const message = importRows(rows);
+        messages.push(`${file.name}: ${message}`);
+        markUploadFromMessage(message);
+      });
+    } catch (error) {
+      messages.push(`${file.name}: ${error.message}`);
+    }
   }
   state.data = enrichData(state.data);
   persist();
   render();
-  showToast(files.length === 1 ? messages[0] : `${files.length} CSV files imported and rolled into the dashboard.`);
+  showToast(files.length === 1 ? messages.join(" ") : `${files.length} files imported and rolled into the dashboard.`);
 }
 
 async function handleGuidedUpload(event) {
   const file = event.target.files?.[0];
   const type = event.target.dataset.guidedUpload;
   if (!file || !type) return;
-  let rows = parseCsv(await file.text());
+  let tables = [];
+  try {
+    tables = await parseUploadFile(file);
+  } catch (error) {
+    showToast(`${file.name}: ${error.message}`);
+    return;
+  }
   if (type === "social") {
     const quarter = inputValue("socialUploadQuarter") || editableQuarter();
     const month = inputValue("socialUploadMonth") || "All months";
     const platform = inputValue("socialUploadPlatform") || "Instagram";
-    rows = rows.map((row) => ({ ...row, Quarter: quarter, Month: month, Platform: platform }));
-    if (rows.some((row) => fieldValue(row, ["posts", "post count", "number of posts"]))) mergeSocialPostCounts(rows);
-    else mergeSocialDaily(rows);
+    tables.forEach((table) => {
+      const rows = table.map((row) => ({ ...row, Quarter: fieldValue(row, ["quarter"]) || quarter, Month: fieldValue(row, ["month"]) || month, Platform: fieldValue(row, ["platform"]) || platform }));
+      if (rows.some((row) => fieldValue(row, ["posts", "post count", "number of posts"]))) mergeSocialPostCounts(rows);
+      else mergeSocialDaily(rows);
+    });
     markUploadReceived("social");
   } else if (type === "meta") {
     const quarter = inputValue("metaUploadQuarter") || editableQuarter();
-    rows = rows.map((row) => ({ ...row, Quarter: quarter }));
-    mergeMetaRows(rows);
+    tables.forEach((table) => mergeMetaRows(table.map((row) => ({ ...row, Quarter: fieldValue(row, ["quarter"]) || quarter }))));
     markUploadReceived("meta");
   } else if (type === "seo") {
     const quarter = inputValue("seoUploadQuarter") || editableQuarter();
-    rows = rows.map((row) => ({ ...row, Quarter: quarter, Month: inputValue("seoUploadMonth") || "All months" }));
+    const month = inputValue("seoUploadMonth") || "All months";
     const reportType = inputValue("seoUploadType");
-    if (reportType === "GBP") mergeGbpRows(rows);
-    else if (reportType === "Website posts") mergeSeoPostRows(rows);
-    else mergeSeoRows(rows);
+    tables.forEach((table) => {
+      const rows = table.map((row) => ({ ...row, Quarter: fieldValue(row, ["quarter"]) || quarter, Month: fieldValue(row, ["month"]) || month }));
+      if (reportType === "GBP") mergeGbpRows(rows);
+      else if (reportType === "Website posts") mergeSeoPostRows(rows);
+      else importRows(rows);
+    });
     markUploadReceived("seo");
   }
   state.data = enrichData(state.data);
@@ -3727,7 +3752,15 @@ function markUploadFromMessage(message = "") {
   if (text.includes("seo") || text.includes("keyword") || text.includes("business profile")) markUploadReceived("seo");
 }
 
-function parseCsv(text) {
+async function parseUploadFile(file) {
+  const name = String(file.name || "").toLowerCase();
+  if (name.endsWith(".xlsx") || name.endsWith(".xls")) return parseWorkbookFile(file);
+  const text = await file.text();
+  if (isGroupedSocialCsv(text)) return [parseGroupedSocialCsv(text)];
+  return [parseCsv(text)];
+}
+
+function parseCsvMatrix(text) {
   const rows = [];
   let row = [];
   let cell = "";
@@ -3755,6 +3788,12 @@ function parseCsv(text) {
   }
   row.push(cell);
   if (row.some((value) => value.trim())) rows.push(row);
+  return rows;
+}
+
+function parseCsv(text) {
+  const rows = parseCsvMatrix(text);
+  if (!rows.length) return [];
   const headers = rows.shift().map((header) => header.replace(/^\uFEFF/, "").trim());
   return rows.map((values) =>
     headers.reduce((record, header, index) => {
@@ -3762,6 +3801,104 @@ function parseCsv(text) {
       return record;
     }, {}),
   );
+}
+
+function isGroupedSocialCsv(text) {
+  const rows = parseCsvMatrix(text).slice(0, 2);
+  if (rows.length < 2) return false;
+  const first = rows[0].map(normalizeColumnName).join("|");
+  const second = rows[1].map(normalizeColumnName).join("|");
+  return first.includes("facebook") && first.includes("instagram") && first.includes("tiktok") && second.includes("reach") && second.includes("engagement");
+}
+
+function parseGroupedSocialCsv(text) {
+  const rows = parseCsvMatrix(text);
+  const dataRows = rows.slice(2);
+  const result = [];
+  dataRows.forEach((cells) => {
+    const date = toIsoDate(cells[0]);
+    if (!date) return;
+    result.push({
+      Date: date,
+      Quarter: fiscalQuarterForDate(date),
+      Month: monthLabel(date),
+      Platform: "Facebook",
+      Views: cells[1] || "",
+      Reach: cells[2] || "",
+      Engagements: cells[3] || "",
+      "Link Clicks": cells[4] || "",
+    });
+    result.push({
+      Date: date,
+      Quarter: fiscalQuarterForDate(date),
+      Month: monthLabel(date),
+      Platform: "Instagram",
+      Views: cells[5] || "",
+      Reach: cells[6] || "",
+      Engagements: cells[7] || "",
+      "Link Clicks": cells[8] || "",
+    });
+    result.push({
+      Date: date,
+      Quarter: fiscalQuarterForDate(date),
+      Month: monthLabel(date),
+      Platform: "TikTok",
+      Views: cells[9] || "",
+      Reach: cells[10] || "",
+      Engagements: cells[11] || "",
+      "Link Clicks": "",
+    });
+  });
+  return result;
+}
+
+async function parseWorkbookFile(file) {
+  const XLSX = await loadXlsxLibrary();
+  const workbook = XLSX.read(await file.arrayBuffer(), { type: "array", cellDates: true });
+  const isSearchConsoleWorkbook = workbook.SheetNames.includes("Chart") && workbook.SheetNames.includes("Queries");
+  const inferredPeriod = isSearchConsoleWorkbook ? inferWorkbookPeriod(XLSX, workbook) : {};
+  return workbook.SheetNames
+    .filter((sheetName) => !isSearchConsoleWorkbook || ["Chart", "Queries"].includes(sheetName))
+    .map((sheetName) => {
+      const rows = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], { defval: "", raw: false });
+      return rows.map((row) => ({
+        ...row,
+        Quarter: fieldValue(row, ["quarter"]) || inferredPeriod.quarter || "",
+        Month: fieldValue(row, ["month"]) || inferredPeriod.month || "",
+        __sheetName: sheetName,
+        __fileName: file.name,
+      }));
+    })
+    .filter((rows) => rows.length);
+}
+
+function inferWorkbookPeriod(XLSX, workbook) {
+  const chartRows = workbook.Sheets.Chart ? XLSX.utils.sheet_to_json(workbook.Sheets.Chart, { defval: "", raw: false }) : [];
+  const date = toIsoDate(fieldValue(chartRows[0] || {}, ["date", "day"]));
+  return {
+    quarter: fiscalQuarterForDate(date),
+    month: monthLabel(date),
+  };
+}
+
+async function loadXlsxLibrary() {
+  if (window.XLSX) return window.XLSX;
+  await new Promise((resolve, reject) => {
+    const existing = document.querySelector("script[data-xlsx-loader]");
+    if (existing) {
+      existing.addEventListener("load", resolve, { once: true });
+      existing.addEventListener("error", reject, { once: true });
+      return;
+    }
+    const script = document.createElement("script");
+    script.dataset.xlsxLoader = "true";
+    script.src = "https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js";
+    script.onload = resolve;
+    script.onerror = () => reject(new Error("XLSX upload support could not load. Export the workbook sheets as CSV or use the deployed dashboard with internet access."));
+    document.head.append(script);
+  });
+  if (!window.XLSX) throw new Error("XLSX upload support did not initialize.");
+  return window.XLSX;
 }
 
 function hasColumns(rows, columns) {
@@ -3848,10 +3985,31 @@ function mergeSocialPostCounts(rows) {
   return "Social post counts merged into the stored period data.";
 }
 
+function mergeYouTubeRows(rows) {
+  const mappedRows = rows
+    .map((row) => {
+      const date = toIsoDate(fieldValue(row, ["date", "day"]));
+      if (!date) return null;
+      return {
+        Date: date,
+        Quarter: fieldValue(row, ["quarter"]) || fiscalQuarterForDate(date),
+        Month: monthLabel(date),
+        Platform: "YouTube",
+        Views: fieldValue(row, ["views"]),
+        Reach: fieldValue(row, ["reach"]),
+        Engagements: fieldValue(row, ["engagement", "engagements"]),
+        "Link Clicks": "",
+      };
+    })
+    .filter(Boolean);
+  mergeSocialDaily(mappedRows);
+  return "YouTube daily social rows merged into the stored period data.";
+}
+
 function mergeMetaRows(rows) {
   rows.forEach((row) => {
-    const quarter = fieldValue(row, ["quarter"]) || state.quarter;
-    const date = toIsoDate(fieldValue(row, ["date", "week", "week start"]));
+    const date = toIsoDate(fieldValue(row, ["date", "day", "week", "week start", "reporting starts"]));
+    const quarter = fieldValue(row, ["quarter"]) || fiscalQuarterForDate(date) || state.quarter;
     let target = state.data.metaAds.find((item) => item.quarter === quarter);
     if (!target) {
       target = { quarter, campaigns: [], series: [] };
@@ -3865,10 +4023,11 @@ function mergeMetaRows(rows) {
       reach: parseNumber(fieldValue(row, ["reach"])),
       linkClicks: parseNumber(fieldValue(row, ["link clicks", "link click"])),
       uniqueLinkClicks: parseNumber(fieldValue(row, ["unique link clicks", "unique clicks"])),
-      amountSpent: parseNumber(fieldValue(row, ["amount spent", "amount spend", "spend"])),
-      cpm: parseNumber(fieldValue(row, ["cpm"])),
-      cpc: parseNumber(fieldValue(row, ["cpc"])),
-      ctr: parseNumber(fieldValue(row, ["ctr"])),
+      amountSpent: parseNumber(fieldValue(row, ["amount spent", "amount spend", "amount spent cad", "spend"])),
+      cpm: parseNumber(fieldValue(row, ["cpm", "cpm cost per 1 000 impressions"])),
+      cpc: parseNumber(fieldValue(row, ["cpc", "cpc cost per link click"])),
+      ctr: parseNumber(fieldValue(row, ["ctr", "ctr all"])),
+      leads: parseNumber(fieldValue(row, ["leads", "conversions/leads"])),
     }]);
   });
   return "Meta Ads rows merged into the stored period data.";
@@ -3876,17 +4035,18 @@ function mergeMetaRows(rows) {
 
 function mergeSeoRows(rows) {
   rows.forEach((row) => {
-    const quarter = fieldValue(row, ["quarter"]) || state.quarter;
+    const date = toIsoDate(fieldValue(row, ["date", "day", "week", "week start"]));
+    const quarter = fieldValue(row, ["quarter"]) || fiscalQuarterForDate(date) || state.quarter;
     let target = state.data.seoReport.find((item) => item.quarter === quarter);
     if (!target) {
       target = { quarter, keywordRows: [], series: [], posts: 0, postRows: [] };
       state.data.seoReport.push(target);
     }
-    const keyword = fieldValue(row, ["keyword"]);
+    const keyword = fieldValue(row, ["keyword", "query", "top queries"]);
     if (keyword) {
       const keywordRow = {
         keyword,
-        brandGeneric: fieldValue(row, ["type", "brand/generic"]) || "Generic",
+        brandGeneric: fieldValue(row, ["type", "brand/generic"]) || (keyword.toLowerCase().includes("terzetto") ? "Brand" : "Generic"),
         clicks: parseNumber(fieldValue(row, ["clicks"])),
         impressions: parseNumber(fieldValue(row, ["impressions"])),
         ctr: parseNumber(fieldValue(row, ["ctr", "average ctr"])),
@@ -3897,7 +4057,6 @@ function mergeSeoRows(rows) {
       else target.keywordRows.push(keywordRow);
       return;
     }
-    const date = toIsoDate(fieldValue(row, ["date", "week", "week start"]));
     target.posts += parseNumber(fieldValue(row, ["website posts", "posts"]));
     target.series = mergeByDate(target.series || [], [{
       date,
@@ -3966,6 +4125,9 @@ function importRows(rows) {
   if (hasColumns(rows, ["quarter", "platform", "date", "reach"])) {
     return mergeSocialDaily(rows);
   }
+  if (hasColumns(rows, ["date", "reach", "views"]) && hasAnyColumn(rows, ["subscribers gained", "engagement"])) {
+    return mergeYouTubeRows(rows);
+  }
   if (hasColumns(rows, ["quarter", "post date", "post link"])) {
     return mergeSeoPostRows(rows);
   }
@@ -3975,13 +4137,28 @@ function importRows(rows) {
   if (hasColumns(rows, ["quarter", "date", "impressions", "link clicks"])) {
     return mergeMetaRows(rows);
   }
+  if (hasColumns(rows, ["day", "impressions", "link clicks"]) && hasAnyColumn(rows, ["amount spent cad", "amount spent", "spend"])) {
+    return mergeMetaRows(rows);
+  }
+  if (hasColumns(rows, ["date", "impressions", "link clicks"]) && hasAnyColumn(rows, ["amount spent cad", "amount spent", "spend"])) {
+    return mergeMetaRows(rows);
+  }
   if (hasColumns(rows, ["quarter", "date", "calls", "website clicks"])) {
     return mergeGbpRows(rows);
   }
   if (hasColumns(rows, ["quarter", "keyword", "clicks", "impressions"])) {
     return mergeSeoRows(rows);
   }
+  if (hasColumns(rows, ["top queries", "clicks", "impressions"])) {
+    return mergeSeoRows(rows);
+  }
   if (hasColumns(rows, ["quarter", "date", "clicks", "impressions"])) {
+    return mergeSeoRows(rows);
+  }
+  if (hasColumns(rows, ["date", "clicks", "impressions"]) && hasAnyColumn(rows, ["ctr", "average ctr", "position", "average position"])) {
+    return mergeSeoRows(rows);
+  }
+  if (hasColumns(rows, ["day", "clicks", "impressions"]) && hasAnyColumn(rows, ["ctr", "average ctr", "position", "average position"])) {
     return mergeSeoRows(rows);
   }
   if (hasColumns(rows, ["quarter", "spend", "leads"]) && hasAnyColumn(rows, ["revenue won", "won leads", "cpa"]) && !hasAnyColumn(rows, ["channel", "channel group"])) {
@@ -4173,11 +4350,31 @@ function sortObject(object) {
   return Object.fromEntries(Object.entries(object).sort((a, b) => b[1] - a[1]).slice(0, 12));
 }
 
-function quarterFromDate(value) {
+function fiscalQuarterForDate(value) {
+  return quarterFromDate(value);
+}
+
+function datePartsFromValue(value) {
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return { year: value.getFullYear(), month: value.getMonth() + 1, day: value.getDate() };
+  }
+  const text = String(value || "").trim();
+  const isoMatch = text.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})/);
+  if (isoMatch) return { year: Number(isoMatch[1]), month: Number(isoMatch[2]), day: Number(isoMatch[3]) };
+  const slashMatch = text.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})/);
+  if (slashMatch) {
+    const year = Number(slashMatch[3].length === 2 ? `20${slashMatch[3]}` : slashMatch[3]);
+    return { year, month: Number(slashMatch[1]), day: Number(slashMatch[2]) };
+  }
   const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "";
-  const month = date.getMonth() + 1;
-  const year = date.getFullYear();
+  if (Number.isNaN(date.getTime())) return null;
+  return { year: date.getFullYear(), month: date.getMonth() + 1, day: date.getDate() };
+}
+
+function quarterFromDate(value) {
+  const parts = datePartsFromValue(value);
+  if (!parts) return "";
+  const { month, year } = parts;
   if ([12, 1, 2].includes(month)) return `Q1 ${month === 12 ? year + 1 : year}`;
   if ([3, 4, 5].includes(month)) return `Q2 ${year}`;
   if ([6, 7, 8].includes(month)) return `Q3 ${year}`;
@@ -4185,20 +4382,23 @@ function quarterFromDate(value) {
 }
 
 function toIsoDate(value) {
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? "" : date.toISOString().slice(0, 10);
+  const parts = datePartsFromValue(value);
+  if (!parts) return "";
+  return `${parts.year}-${String(parts.month).padStart(2, "0")}-${String(parts.day).padStart(2, "0")}`;
 }
 
 function monthLabel(value) {
-  const date = new Date(value);
-  return Number.isNaN(date.getTime())
+  const iso = toIsoDate(value);
+  const date = new Date(`${iso}T12:00:00`);
+  return !iso || Number.isNaN(date.getTime())
     ? ""
     : date.toLocaleDateString("en-CA", { month: "short", year: "numeric" });
 }
 
 function shortDate(value) {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return String(value || "");
+  const iso = toIsoDate(value);
+  const date = new Date(`${iso}T12:00:00`);
+  if (!iso || Number.isNaN(date.getTime())) return String(value || "");
   return date.toLocaleDateString("en-CA", { month: "short", day: "numeric" });
 }
 
@@ -4404,6 +4604,19 @@ function barChart(rows, labelKey, keys, options = {}) {
   </svg>`;
 }
 
+function shouldShowAxisLabel(index, total, maxLabels = 6) {
+  if (total <= maxLabels) return true;
+  if (index === 0 || index === total - 1) return true;
+  const step = Math.max(1, Math.ceil(total / maxLabels));
+  return index % step === 0;
+}
+
+function axisLabelAnchor(index, total) {
+  if (index === 0) return "start";
+  if (index === total - 1) return "end";
+  return "middle";
+}
+
 function lineChart(rows, labelKey, firstKey, secondKey, options = {}) {
   const width = 760;
   const height = options.height || 280;
@@ -4414,7 +4627,6 @@ function lineChart(rows, labelKey, firstKey, secondKey, options = {}) {
   const magnitude = 10 ** Math.floor(Math.log10(rawMax));
   const max = Math.ceil(rawMax / magnitude) * magnitude;
   const yTicks = [max, max / 2, 0];
-  const xStep = Math.max(1, Math.ceil(rows.length / 6));
   function points(key) {
     return rows
       .map((row, index) => {
@@ -4445,9 +4657,9 @@ function lineChart(rows, labelKey, firstKey, secondKey, options = {}) {
     .join("");
   const xLabels = rows
     .map((row, index) => {
-      if (index !== 0 && index !== rows.length - 1 && index % xStep !== 0) return "";
+      if (!shouldShowAxisLabel(index, rows.length)) return "";
       const x = padding.left + (rows.length <= 1 ? 0 : (index / (rows.length - 1)) * innerWidth);
-      return `<text x="${x}" y="${height - 22}" text-anchor="middle" font-size="12" fill="#544845">${escapeHtml(row[labelKey])}</text>`;
+      return `<text x="${x}" y="${height - 22}" text-anchor="${axisLabelAnchor(index, rows.length)}" font-size="12" fill="#544845">${escapeHtml(row[labelKey])}</text>`;
     })
     .join("");
   return `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Line chart">
@@ -4474,7 +4686,6 @@ function searchConsoleComboChart(rows, options = {}) {
   const innerHeight = height - padding.top - padding.bottom;
   const impressionMax = axisMax(Math.max(1, ...rows.map((row) => parseNumber(row.impressions))));
   const clickMax = axisMax(Math.max(1, ...rows.map((row) => parseNumber(row.clicks))));
-  const xStep = Math.max(1, Math.ceil(rows.length / 6));
   const groupWidth = innerWidth / Math.max(1, rows.length);
   const barWidth = Math.max(16, Math.min(48, groupWidth * 0.42));
   const bars = rows.map((row, index) => {
@@ -4498,9 +4709,9 @@ function searchConsoleComboChart(rows, options = {}) {
     return `<line x1="${padding.left}" y1="${y}" x2="${width - padding.right}" y2="${y}" stroke="rgba(84,72,69,.12)" /><text x="${padding.left - 12}" y="${y + 4}" text-anchor="end" font-size="12" fill="#544845">${formatNumber(Math.round(impressionMax * ratio))}</text><text x="${width - padding.right + 12}" y="${y + 4}" font-size="12" fill="#c12400">${formatNumber(Math.round(clickMax * ratio))}</text>`;
   }).join("");
   const xLabels = rows.map((row, index) => {
-    if (index !== 0 && index !== rows.length - 1 && index % xStep !== 0) return "";
+    if (!shouldShowAxisLabel(index, rows.length)) return "";
     const x = padding.left + index * groupWidth + groupWidth / 2;
-    return `<text x="${x}" y="${height - 22}" text-anchor="middle" font-size="12" fill="#544845">${escapeHtml(row.label)}</text>`;
+    return `<text x="${x}" y="${height - 22}" text-anchor="${axisLabelAnchor(index, rows.length)}" font-size="12" fill="#544845">${escapeHtml(row.label)}</text>`;
   }).join("");
   return `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Search Console impressions and clicks chart">
     <g transform="translate(${padding.left}, 8)"><rect width="10" height="10" rx="2" fill="#544845"></rect><text x="16" y="10" font-size="12" fill="#544845">Impressions</text></g>
@@ -4533,7 +4744,6 @@ function dualAxisLineChart(rows, labelKey, firstKey, secondKey, options = {}) {
   const innerHeight = height - padding.top - padding.bottom;
   const firstMax = Math.max(1, ...rows.map((row) => parseNumber(row[firstKey])));
   const secondMax = Math.max(1, ...rows.map((row) => parseNumber(row[secondKey])));
-  const xStep = Math.max(1, Math.ceil(rows.length / 6));
   const maxA = axisMax(firstMax);
   const maxB = axisMax(secondMax);
   const firstType = options.firstType || "number";
@@ -4570,9 +4780,9 @@ function dualAxisLineChart(rows, labelKey, firstKey, secondKey, options = {}) {
     return `<line x1="${padding.left}" y1="${y}" x2="${width - padding.right}" y2="${y}" stroke="rgba(84,72,69,.12)" /><text x="${padding.left - 12}" y="${y + 4}" text-anchor="end" font-size="12" fill="#544845">${axisValue(maxA * ratio, firstType)}</text><text x="${width - padding.right + 12}" y="${y + 4}" font-size="12" fill="#544845">${axisValue(maxB * ratio, secondType)}</text>`;
   }).join("");
   const xLabels = rows.map((row, index) => {
-    if (index !== 0 && index !== rows.length - 1 && index % xStep !== 0) return "";
+    if (!shouldShowAxisLabel(index, rows.length)) return "";
     const x = padding.left + (rows.length <= 1 ? 0 : (index / (rows.length - 1)) * innerWidth);
-    return `<text x="${x}" y="${height - 22}" text-anchor="middle" font-size="12" fill="#544845">${escapeHtml(row[labelKey])}</text>`;
+    return `<text x="${x}" y="${height - 22}" text-anchor="${axisLabelAnchor(index, rows.length)}" font-size="12" fill="#544845">${escapeHtml(row[labelKey])}</text>`;
   }).join("");
   return `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Dual axis line chart">
     <g transform="translate(${padding.left}, 8)"><rect width="10" height="10" rx="2" fill="#c12400"></rect><text x="16" y="10" font-size="12" fill="#544845">${escapeHtml(options.firstLabel || firstKey)}</text></g>
