@@ -194173,7 +194173,7 @@ button:disabled {
       </main>
     </div>
     <script type="module">const DATA_URL = "data/marketing-data.json";
-const STORAGE_KEY = "digitalMarketingDashboard:data:v15";
+const STORAGE_KEY = "digitalMarketingDashboard:data:v16";
 const AUTH_KEY = "digitalMarketingDashboard:authRole";
 const ADMIN_PASSWORD = "admin2026";
 const CEO_PASSWORD = "terzettoceo2026";
@@ -194397,6 +194397,7 @@ function findQuarter(quarter) {
       cpql: safeRatio(spend, qualified),
       won,
       winRate: safeRatio(won, qualified) * 100,
+      closingRatio: safeRatio(won, qualified) * 100,
       revenue,
       roas: safeRatio(revenue, spend),
     };
@@ -194556,6 +194557,7 @@ function buildQuarterSummary(data, quarter) {
     won,
     cpa: safeRatio(spend, won),
     winRate: safeRatio(won, qualified) * 100,
+    closingRatio: safeRatio(won, qualified) * 100,
     revenue,
     roas: safeRatio(revenue, spend),
   };
@@ -195209,7 +195211,7 @@ function insightItemsForView() {
   };
   const base = [
     { label: "Lead quality", value: formatPct(safeRatio(q.totalQualified, q.totalLeads) * 100, 0), note: "qualified share of total leads" },
-    { label: "Win efficiency", value: formatPct(q.winRate, 0), note: "won deals from qualified leads" },
+    { label: "Closing ratio", value: formatPct(q.closingRatio, 0), note: "won deals from qualified leads" },
     { label: "Revenue leverage", value: `${safeRatio(q.revenue, q.spend).toFixed(1)}x`, note: "closed revenue against spend" },
     { label: "Average deal", value: formatMoney(safeRatio(q.revenue, q.won)), note: "won revenue per closed deal" },
   ];
@@ -195352,6 +195354,7 @@ function overviewMetrics(quarter = state.quarter, month = activeMonth()) {
       cpql: safeRatio(spend, resolvedQualified),
       cpa: safeRatio(spend, resolvedWon),
       winRate: safeRatio(resolvedWon, resolvedQualified) * 100,
+      closingRatio: safeRatio(resolvedWon, resolvedQualified) * 100,
     };
   }
   const weeks = quarterWeeks(quarter).filter((row) => row.month === month);
@@ -195380,6 +195383,7 @@ function overviewMetrics(quarter = state.quarter, month = activeMonth()) {
     cpql: safeRatio(spend, pipeline.qualified || qualified),
     cpa: safeRatio(spend, pipeline.won || won),
     winRate: safeRatio(pipeline.won || won, pipeline.qualified || qualified) * 100,
+    closingRatio: safeRatio(pipeline.won || won, pipeline.qualified || qualified) * 100,
   };
 }
 
@@ -195584,6 +195588,7 @@ function heroContent() {
       stats: [
         heroStat("Revenue won", formatMoney(q.revenue), q.revenue, previous?.revenue),
         heroStat("Qualified leads", formatNumber(q.qualified), q.qualified, previous?.qualified),
+        heroStat("Closing ratio", formatPct(q.closingRatio, 0), q.closingRatio, previous?.closingRatio),
         heroStat("CPQL", formatMoney(q.cpql, true), q.cpql, previous?.cpql),
         heroStat("In progress", formatNumber(q.inProgress), q.inProgress, previous?.inProgress),
         heroStat("Pipeline value", formatMoney(q.pipelineValue), q.pipelineValue, previous?.pipelineValue),
@@ -195661,6 +195666,7 @@ function renderOverviewView() {
       ${metricCard("Qualified leads", formatNumber(q.qualified), "Leads marked qualified or sales-ready.", q.qualified, previous?.qualified)}
       ${metricCard("In progress", formatNumber(q.inProgress), "Qualified leads that are not yet won or lost.", q.inProgress, previous?.inProgress)}
       ${metricCard("Won deals", formatNumber(q.won), "Closed deals in the selected period, including referrals.", q.won, previous?.won)}
+      ${metricCard("Closing ratio", formatPct(q.closingRatio, 0), "Won deals divided by qualified leads.", q.closingRatio, previous?.closingRatio)}
       ${metricCard("Revenue won", formatMoney(q.revenue), "Closed revenue in the selected period, including referrals.", q.revenue, previous?.revenue)}
       ${metricCard("Avg. deal size", formatMoney(safeRatio(q.revenue, q.won)), "Average closed revenue per won deal.", safeRatio(q.revenue, q.won), previous ? safeRatio(previous.revenue, previous.won) : null)}
       ${metricCard("Pipeline value", formatMoney(q.pipelineValue), "Estimated value of qualified leads still in progress.", q.pipelineValue, previous?.pipelineValue)}
@@ -195689,6 +195695,7 @@ function renderOverviewInlineCompare(current, compare) {
         ["Total leads", "totalLeads", "number"],
         ["Qualified", "qualified", "number"],
         ["In progress", "inProgress", "number"],
+        ["Closing ratio", "closingRatio", "pct"],
         ["Revenue", "revenue", "money"],
         ["Pipeline value", "pipelineValue", "money"],
       ])}
@@ -195781,11 +195788,11 @@ function renderQuarterlySummaryPanel() {
         </div>
         <div class="executive-table-wrap period-table-wrap">
           <table class="executive-table period-table">
-            <thead><tr><th>Period</th><th>Qualified</th><th>Spend</th><th>Revenue</th><th>Avg. deal</th><th>Win rate</th></tr></thead>
+            <thead><tr><th>Period</th><th>Qualified</th><th>Spend</th><th>Revenue</th><th>Avg. deal</th><th>Closing ratio</th></tr></thead>
             <tbody>
               ${rows.map((row) => {
                 const currentBadge = row.isCurrent ? `<span class="source-pill source-warm">Current</span>` : "";
-                return `<tr><td><strong>${escapeHtml(row.period || row.quarter)}</strong> ${currentBadge}</td><td>${formatNumber(row.qualified)}</td><td>${formatMoney(row.spend)}</td><td class="money-cell">${formatMoney(row.revenue)}</td><td>${formatMoney(safeRatio(row.revenue, row.won))}</td><td>${formatPct(row.winRate, 0)}</td></tr>`;
+                return `<tr><td><strong>${escapeHtml(row.period || row.quarter)}</strong> ${currentBadge}</td><td>${formatNumber(row.qualified)}</td><td>${formatMoney(row.spend)}</td><td class="money-cell">${formatMoney(row.revenue)}</td><td>${formatMoney(safeRatio(row.revenue, row.won))}</td><td>${formatPct(row.closingRatio ?? row.winRate, 0)}</td></tr>`;
               }).join("")}
             </tbody>
           </table>
@@ -195819,6 +195826,7 @@ function periodSummaryRows(quarter = state.quarter, month = activeMonth()) {
           revenue: row.revenue,
           won: row.won,
           winRate: safeRatio(row.won, row.qualified) * 100,
+          closingRatio: safeRatio(row.won, row.qualified) * 100,
         };
       });
     return { title: "Period Performance Trend", label: month, rows };
@@ -195834,6 +195842,7 @@ function periodSummaryRows(quarter = state.quarter, month = activeMonth()) {
       revenue: leadMetrics.revenue || row.revenue,
       won: leadMetrics.won || row.won,
       winRate: safeRatio(leadMetrics.won || row.won, leadMetrics.qualified || row.qualified) * 100,
+      closingRatio: safeRatio(leadMetrics.won || row.won, leadMetrics.qualified || row.qualified) * 100,
     };
   });
   return { title: "Period Performance Trend", label: quarter, rows };
@@ -195991,7 +196000,7 @@ function renderQuarterTable(rows, label = selectedPeriodLabel()) {
       <div class="panel-header"><h3>Lead Source Overview</h3><span class="fine-print">${escapeHtml(label)}</span></div>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>Channel</th><th>Spend</th><th>Leads</th><th>Qualified</th><th>Unqualified</th><th>CPQL</th><th>Won</th><th>Revenue</th><th>ROAS</th></tr></thead>
+          <thead><tr><th>Channel</th><th>Spend</th><th>Leads</th><th>Qualified</th><th>Unqualified</th><th>CPQL</th><th>Won</th><th>Closing ratio</th><th>Revenue</th><th>ROAS</th></tr></thead>
           <tbody>
             ${rows
               .map(
@@ -196004,6 +196013,7 @@ function renderQuarterTable(rows, label = selectedPeriodLabel()) {
                     <td>${formatNumber(Math.max(0, row.leads - row.qualified))}</td>
                     <td>${formatMoney(row.cpql, true)}</td>
                     <td>${formatNumber(row.won)}</td>
+                    <td>${formatPct(safeRatio(row.won, row.qualified) * 100, 0)}</td>
                     <td>${formatMoney(row.revenue)}</td>
                     <td>${Number(row.roas || 0).toFixed(2)}</td>
                   </tr>
@@ -196027,6 +196037,7 @@ function renderCompareView() {
     ["In progress", "inProgress", "number"],
     ["Pipeline value", "pipelineValue", "money"],
     ["Won", "won", "number"],
+    ["Closing ratio", "closingRatio", "pct"],
     ["CPA", "cpa", "money"],
     ["Total leads", "totalLeads", "number"],
   ];
@@ -196053,7 +196064,7 @@ function renderCompareView() {
       ${renderCompareMetricPanel("Social", socialLeft, socialRight, [["Views", "views", "number"], ["Reach", "reach", "number"], ["Engagements", "engagements", "number"], ["Link clicks", "linkClicks", "number"]])}
       ${renderCompareMetricPanel("Meta Ads", metaLeft, metaRight, [["Impressions", "impressions", "number"], ["Link clicks", "linkClicks", "number"], ["Spend", "amountSpent", "money"], ["CPM", "cpm", "money"], ["CPC", "cpc", "money"], ["CTR", "ctr", "pct"]])}
       ${renderCompareMetricPanel("SEO", { ...seoLeft, gbpActions: gbpLeft.calls + gbpLeft.bookings + gbpLeft.directionRequests + gbpLeft.websiteClicks }, { ...seoRight, gbpActions: gbpRight.calls + gbpRight.bookings + gbpRight.directionRequests + gbpRight.websiteClicks }, [["Clicks", "clicks", "number"], ["Impressions", "impressions", "number"], ["Average CTR", "ctr", "pct"], ["Avg. position", "avgPosition", "number"], ["GBP actions", "gbpActions", "number"]])}
-      ${renderCompareMetricPanel("Leads", left, right, [["CPQL", "cpql", "money"], ["Qualified", "totalQualified", "number"], ["In progress", "inProgress", "number"], ["Won deals", "won", "number"], ["Revenue won", "revenue", "money"], ["Pipeline value", "pipelineValue", "money"]])}
+      ${renderCompareMetricPanel("Leads", left, right, [["CPQL", "cpql", "money"], ["Qualified", "totalQualified", "number"], ["In progress", "inProgress", "number"], ["Won deals", "won", "number"], ["Closing ratio", "closingRatio", "pct"], ["Revenue won", "revenue", "money"], ["Pipeline value", "pipelineValue", "money"]])}
     </section>
     ${renderComparePeriodDetails()}
   `;
@@ -196093,9 +196104,9 @@ function renderCompareTrendPanel(summary, label) {
       <div class="executive-chart">${quarterlyComboChart(summary.rows)}</div>
       <div class="executive-table-wrap compact-table">
         <table class="executive-table period-table">
-          <thead><tr><th>Period</th><th>Qualified</th><th>Spend</th><th>Revenue</th><th>Won</th></tr></thead>
+          <thead><tr><th>Period</th><th>Qualified</th><th>Spend</th><th>Revenue</th><th>Won</th><th>Closing ratio</th></tr></thead>
           <tbody>
-            ${summary.rows.map((row) => `<tr><td><strong>${escapeHtml(row.period || row.quarter)}</strong></td><td>${formatNumber(row.qualified)}</td><td>${formatMoney(row.spend)}</td><td class="money-cell">${formatMoney(row.revenue)}</td><td>${formatNumber(row.won)}</td></tr>`).join("")}
+            ${summary.rows.map((row) => `<tr><td><strong>${escapeHtml(row.period || row.quarter)}</strong></td><td>${formatNumber(row.qualified)}</td><td>${formatMoney(row.spend)}</td><td class="money-cell">${formatMoney(row.revenue)}</td><td>${formatNumber(row.won)}</td><td>${formatPct(row.closingRatio ?? row.winRate, 0)}</td></tr>`).join("")}
           </tbody>
         </table>
       </div>
@@ -197008,11 +197019,12 @@ function renderLeadsView() {
       ${metricCard("Leads not qualified", formatNumber(leadsNotQualified), "Leads not qualified.", leadsNotQualified, previousNotQualified)}
       ${metricCard("In progress", formatNumber(q.inProgress), "Qualified leads that are not yet won or lost.", q.inProgress, previous?.inProgress)}
       ${metricCard("Won deals", formatNumber(q.won), "Closed deals from selected period.", q.won, previous?.won)}
+      ${metricCard("Closing ratio", formatPct(q.closingRatio, 0), "Won deals divided by qualified leads.", q.closingRatio, previous?.closingRatio)}
       ${metricCard("Avg. deal size", formatMoney(safeRatio(q.revenue, q.won)), "Average closed revenue per won deal.", safeRatio(q.revenue, q.won), previous ? safeRatio(previous.revenue, previous.won) : null)}
       ${metricCard("CPA", formatMoney(q.cpa, true), "Cost per acquisition or won deal.", q.cpa, previous?.cpa)}
       ${metricCard("Pipeline value", formatMoney(q.pipelineValue), "Estimated value of qualified leads still in progress.", q.pipelineValue, previous?.pipelineValue)}
     </section>
-    ${state.compareEnabled ? `<section class="panel section"><div class="panel-header"><h3>Pipeline Comparison</h3><span class="badge">${escapeHtml(state.granularity === "Monthly" ? activeCompareMonth() : state.compareQuarter)}</span></div>${renderDeltaGrid(q, previous, [["Total leads", "totalLeads", "number"], ["Qualified leads", "totalQualified", "number"], ["In progress", "inProgress", "number"], ["Won deals", "won", "number"], ["CPA", "cpa", "money"], ["Pipeline value", "pipelineValue", "money"], ["Revenue won", "revenue", "money"]])}</section>${renderComparePeriodDetails()}${renderLeadCompareTables()}` : `
+    ${state.compareEnabled ? `<section class="panel section"><div class="panel-header"><h3>Pipeline Comparison</h3><span class="badge">${escapeHtml(state.granularity === "Monthly" ? activeCompareMonth() : state.compareQuarter)}</span></div>${renderDeltaGrid(q, previous, [["Total leads", "totalLeads", "number"], ["Qualified leads", "totalQualified", "number"], ["In progress", "inProgress", "number"], ["Won deals", "won", "number"], ["Closing ratio", "closingRatio", "pct"], ["CPA", "cpa", "money"], ["Pipeline value", "pipelineValue", "money"], ["Revenue won", "revenue", "money"]])}</section>${renderComparePeriodDetails()}${renderLeadCompareTables()}` : `
       <section class="grid-2 equal-grid">
         ${renderPipelinePanel(q)}
         ${renderWonDealsPanel(wonDeals, "Closed Deal Log", "Closed deals")}
@@ -198345,6 +198357,7 @@ function importRows(rows) {
       won: parseNumber(fieldValue(row, ["won leads", "won deals", "won"])),
       cpa: parseNumber(fieldValue(row, ["cpa"])),
       winRate: parseNumber(fieldValue(row, ["win rate"])),
+      closingRatio: parseNumber(fieldValue(row, ["closing ratio", "close ratio", "win rate"])),
       revenue: parseNumber(fieldValue(row, ["revenue won", "closed revenue", "revenue"])),
     }));
     return "Quarterly performance updated.";
