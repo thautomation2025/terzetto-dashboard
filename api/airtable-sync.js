@@ -22,9 +22,28 @@ const LEAD_FIELDS = [
   "Revenue Won",
   "Quarter",
   "Date Added",
+  "Date Added to CoConstruct",
   "Feedback",
   "Won?",
   "Qualified?",
+];
+
+const QUALIFIED_DATE_FIELDS = [
+  "Date Added to CoConstruct",
+  "Date Added to Coconstruct",
+  "Date Added to Co-Construct",
+  "Added to CoConstruct",
+  "Added to Coconstruct",
+  "Added to Co-Construct",
+  "Added to CoConstruct Date",
+  "Added to Coconstruct Date",
+  "Added to Co-Construct Date",
+  "CoConstruct Date",
+  "Coconstruct Date",
+  "Co-Construct Date",
+  "Qualified Date",
+  "Date Qualified",
+  "Month Qualified",
 ];
 
 function jsonResponse(res, status, body) {
@@ -42,7 +61,7 @@ async function readAllAirtableRecords() {
   do {
     const url = new URL(`https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${encodeURIComponent(AIRTABLE_LEADS_TABLE)}`);
     url.searchParams.set("pageSize", "100");
-    LEAD_FIELDS.forEach((field) => url.searchParams.append("fields[]", field));
+    // Fetch all fields so Airtable schema additions, such as qualification date, do not break sync.
     if (offset) url.searchParams.set("offset", offset);
 
     const response = await fetch(url, {
@@ -82,6 +101,25 @@ function cellTruthy(value) {
   if (typeof value === "boolean") return value;
   const text = cellText(value).toLowerCase();
   return ["checked", "true", "yes", "y", "1", "won", "qualified"].includes(text) || parseNumber(value) > 0;
+}
+
+function normalizeColumnName(value) {
+  return String(value || "")
+    .replace(/^\uFEFF/, "")
+    .replace(/&/g, " and ")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function fieldValue(row, names) {
+  const entries = Object.entries(row || {});
+  for (const name of names) {
+    const normalizedName = normalizeColumnName(name);
+    const found = entries.find(([key]) => normalizeColumnName(key) === normalizedName);
+    if (found) return found[1];
+  }
+  return "";
 }
 
 function quarterFromDate(value) {
@@ -127,37 +165,62 @@ function aggregateLeadRows(rows) {
   const wonDeals = [];
   const leadRecords = [];
   const totals = { leads: rows.length, qualified: 0, lost: 0, inProgress: 0, won: 0, revenue: 0, pipelineValue: 0 };
+  const ensureMonthly = (quarter, month) => {
+    monthly[`${quarter}|${month}`] ||= { quarter, month, leads: 0, qualified: 0, lost: 0, inProgress: 0, won: 0, revenue: 0, pipelineValue: 0 };
+    return monthly[`${quarter}|${month}`];
+  };
+  const ensureChannelPeriod = (quarter, month, channel) => {
+    channelPeriods[`${quarter}|${month}|${channel}`] ||= { quarter, month, channel, leads: 0, qualified: 0, lost: 0, inProgress: 0, won: 0, revenue: 0, pipelineValue: 0 };
+    return channelPeriods[`${quarter}|${month}|${channel}`];
+  };
+  const ensureStatusPeriod = (quarter, month, status) => {
+    statusPeriods[`${quarter}|${month}|${status}`] ||= { quarter, month, status, count: 0 };
+    return statusPeriods[`${quarter}|${month}|${status}`];
+  };
   rows.forEach((row) => {
-    const dateAdded = cellText(row["Date Added"]) || new Date().toISOString().slice(0, 10);
+    const dateAdded = cellText(fieldValue(row, ["Date Added", "Month Added", "Created Date"])) || new Date().toISOString().slice(0, 10);
     const status = cellText(row.Status, "Uncategorized");
     const statusLower = status.toLowerCase();
     const source = cellText(row.Source, "Uncategorized");
     const channel = cellText(row["Channel Group"], "Uncategorized");
     const month = monthLabel(dateAdded);
-    const qualified = cellTruthy(row["Qualified?"]) ? 1 : 0;
-    const won = cellTruthy(row["Won?"]) ? 1 : 0;
+    const qualifiedDate = fieldValue(row, QUALIFIED_DATE_FIELDS);
+    const fallbackQualified = cellTruthy(row["Qualified?"]) ? 1 : 0;
+    const qualified = qualifiedDate ? 1 : fallbackQualified;
+    const qualifiedPeriodDate = qualifiedDate || (fallbackQualified ? dateAdded : "");
+    const qualifiedMonth = qualifiedPeriodDate ? monthLabel(qualifiedPeriodDate) : month;
+    const qualifiedQuarter = qualifiedPeriodDate ? quarterFromDate(qualifiedPeriodDate) || quarterFromDate(dateAdded) : "";
+    const won = cellTruthy(fieldValue(row, ["Won?", "Won Count", "Won Leads", "Won"])) || statusLower === "won" ? 1 : 0;
     const lost = statusLower === "lost" ? 1 : 0;
     const inProgress = qualified && !won && !lost ? 1 : 0;
     const revenue = parseNumber(row["Revenue Won"]);
     const pipelineValue = inProgress ? parseNumber(row["Est. Revenue"]) : 0;
     const quarter = cellText(row.Quarter) || quarterFromDate(dateAdded);
+    const lifecycleQuarter = qualifiedPeriodDate ? qualifiedQuarter : quarter;
+    const lifecycleMonth = qualifiedPeriodDate ? qualifiedMonth : month;
     leadRecords.push({
       name: cellText(row.Name, "Unnamed lead"),
       status,
       source,
       channel,
-      quarter,
-      month,
+      quarter: lifecycleQuarter,
+      month: lifecycleMonth,
+      leadQuarter: quarter,
+      leadMonth: month,
+      qualifiedQuarter,
+      qualifiedMonth,
       revenue,
       pipelineValue,
       date: toIsoDate(dateAdded),
+      qualifiedDate: toIsoDate(qualifiedPeriodDate),
     });
     statuses[status] = (statuses[status] || 0) + 1;
     sources[source] = (sources[source] || 0) + 1;
     channels[channel] ||= { channel, leads: 0, qualified: 0, lost: 0, inProgress: 0, won: 0, revenue: 0, pipelineValue: 0 };
-    monthly[`${quarter}|${month}`] ||= { quarter, month, leads: 0, qualified: 0, lost: 0, inProgress: 0, won: 0, revenue: 0, pipelineValue: 0 };
-    channelPeriods[`${quarter}|${month}|${channel}`] ||= { quarter, month, channel, leads: 0, qualified: 0, lost: 0, inProgress: 0, won: 0, revenue: 0, pipelineValue: 0 };
-    statusPeriods[`${quarter}|${month}|${status}`] ||= { quarter, month, status, count: 0 };
+    const leadMonthRow = ensureMonthly(quarter, month);
+    const leadChannelRow = ensureChannelPeriod(quarter, month, channel);
+    const lifecycleMonthRow = ensureMonthly(lifecycleQuarter, lifecycleMonth);
+    const lifecycleChannelRow = ensureChannelPeriod(lifecycleQuarter, lifecycleMonth, channel);
     channels[channel].leads += 1;
     channels[channel].qualified += qualified;
     channels[channel].lost += lost;
@@ -165,30 +228,30 @@ function aggregateLeadRows(rows) {
     channels[channel].won += won;
     channels[channel].revenue += revenue;
     channels[channel].pipelineValue += pipelineValue;
-    monthly[`${quarter}|${month}`].leads += 1;
-    monthly[`${quarter}|${month}`].qualified += qualified;
-    monthly[`${quarter}|${month}`].lost += lost;
-    monthly[`${quarter}|${month}`].inProgress += inProgress;
-    monthly[`${quarter}|${month}`].won += won;
-    monthly[`${quarter}|${month}`].revenue += revenue;
-    monthly[`${quarter}|${month}`].pipelineValue += pipelineValue;
-    channelPeriods[`${quarter}|${month}|${channel}`].leads += 1;
-    channelPeriods[`${quarter}|${month}|${channel}`].qualified += qualified;
-    channelPeriods[`${quarter}|${month}|${channel}`].lost += lost;
-    channelPeriods[`${quarter}|${month}|${channel}`].inProgress += inProgress;
-    channelPeriods[`${quarter}|${month}|${channel}`].won += won;
-    channelPeriods[`${quarter}|${month}|${channel}`].revenue += revenue;
-    channelPeriods[`${quarter}|${month}|${channel}`].pipelineValue += pipelineValue;
-    statusPeriods[`${quarter}|${month}|${status}`].count += 1;
+    leadMonthRow.leads += 1;
+    leadChannelRow.leads += 1;
+    lifecycleMonthRow.qualified += qualified;
+    lifecycleMonthRow.lost += lost;
+    lifecycleMonthRow.inProgress += inProgress;
+    lifecycleMonthRow.won += won;
+    lifecycleMonthRow.revenue += revenue;
+    lifecycleMonthRow.pipelineValue += pipelineValue;
+    lifecycleChannelRow.qualified += qualified;
+    lifecycleChannelRow.lost += lost;
+    lifecycleChannelRow.inProgress += inProgress;
+    lifecycleChannelRow.won += won;
+    lifecycleChannelRow.revenue += revenue;
+    lifecycleChannelRow.pipelineValue += pipelineValue;
+    ensureStatusPeriod(lifecycleQuarter, lifecycleMonth, status).count += 1;
     if (won) {
       wonDeals.push({
         client: cellText(row.Name, "Closed deal"),
         source: channel || source,
         revenue,
-        date: toIsoDate(dateAdded),
-        label: shortDate(dateAdded),
-        quarter,
-        month,
+        date: toIsoDate(qualifiedPeriodDate || dateAdded),
+        label: shortDate(qualifiedPeriodDate || dateAdded),
+        quarter: lifecycleQuarter,
+        month: lifecycleMonth,
       });
     }
     totals.qualified += qualified;

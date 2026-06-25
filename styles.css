@@ -858,6 +858,33 @@ tbody tr:hover {
   font-size: 1.35rem;
 }
 
+.origin-strip strong {
+  font-size: clamp(1rem, 1.5vw, 1.25rem);
+  overflow-wrap: anywhere;
+}
+
+.origin-chart {
+  min-height: 210px;
+}
+
+.origin-source-table th,
+.origin-source-table td,
+.origin-detail-table th,
+.origin-detail-table td {
+  padding: 7px 6px;
+  font-size: 0.9rem;
+}
+
+.origin-detail-table th:nth-child(1),
+.origin-detail-table td:nth-child(1) {
+  width: 18%;
+}
+
+.origin-detail-table th:nth-child(2),
+.origin-detail-table td:nth-child(2) {
+  width: 16%;
+}
+
 .executive-panel {
   display: flex;
   flex-direction: column;
