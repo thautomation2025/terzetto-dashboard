@@ -50,14 +50,25 @@ Lead uploads are aggregated before saving. Emails, phone numbers, and notes are 
 
 ## Source data
 
-The initial dashboard data is generated from the latest files in `/Users/pichi/Downloads` using:
+Update the dashboard data from the latest CSV exports using:
 
 ```text
-tools/prepare_data.py
+python tools/update_dashboard_data.py --source-dir /path/to/reports
 ```
 
 The generated app dataset lives at:
 
 ```text
 data/marketing-data.json
+```
+
+The importer preserves two reporting bases:
+
+- Overall Quarterly Performance is grouped by the date a lead becomes qualified.
+- Marketing and Channel Performance are grouped by the date the lead first enters the pipeline.
+
+Rebuild the local standalone file after a data or UI change:
+
+```text
+python tools/build_standalone.py
 ```

@@ -1,5 +1,5 @@
 const DATA_URL = "data/marketing-data.json";
-const STORAGE_KEY = "digitalMarketingDashboard:data:v21";
+const STORAGE_KEY = "digitalMarketingDashboard:data:v23";
 const AUTH_KEY = "digitalMarketingDashboard:authRole";
 const ADMIN_PASSWORD = "admin2026";
 const CEO_PASSWORD = "terzettoceo2026";
@@ -227,7 +227,7 @@ function currentQuarter() {
 function findQuarter(quarter) {
   if (isOverallPeriod(quarter)) {
     const rows = state.data.quarters || [];
-    const spend = rows.reduce((total, row) => total + periodSpend(row.quarter, "All months", row.spend), 0);
+    const spend = sum(rows, "spend");
     const leads = sum(rows, "leads");
     const qualified = sum(rows, "qualified");
     const won = sum(rows, "won");
@@ -307,7 +307,9 @@ async function loadData() {
   state.quarter = quarters[0];
   state.compareQuarter = quarters.find((quarter) => quarter !== state.quarter) || state.quarter;
   render();
-  refreshAirtableFromEndpoint({ silent: true, persistResult: false });
+  if (state.data.manual.airtable?.enabled) {
+    refreshAirtableFromEndpoint({ silent: true, persistResult: false });
+  }
 }
 
 function persist() {
@@ -366,6 +368,7 @@ function collectKnownQuarters(data) {
   };
   [
     ...(data.quarters || []),
+    ...(data.marketingQuarters || []),
     ...(data.channelQuarterly || []),
     ...(data.channelWeekly || []),
     ...(data.weeks || []),
@@ -1176,19 +1179,19 @@ function overviewMetrics(quarter = state.quarter, month = activeMonth()) {
   const hasPipeline = pipeline.hasRows;
   const referralLeads = referralLeadCount(quarter, month);
   const totalLeads = hasPipeline ? pipeline.leads : findQuarter(quarter).leads || 0;
-  const marketingLeads = Math.max(0, totalLeads - referralLeads);
   if (month === "All months") {
     const q = findQuarter(quarter);
-    const resolvedWon = hasPipeline ? pipeline.won : q.won || 0;
-    const resolvedQualified = hasPipeline ? pipeline.qualified : q.qualified || 0;
-    const resolvedRevenue = hasPipeline ? pipeline.revenue : q.revenue || 0;
-    const spend = periodSpend(quarter, "All months", q.spend || 0);
+    const resolvedTotalLeads = q.leads ?? totalLeads;
+    const resolvedWon = q.won ?? (hasPipeline ? pipeline.won : 0);
+    const resolvedQualified = q.qualified ?? (hasPipeline ? pipeline.qualified : 0);
+    const resolvedRevenue = q.revenue ?? (hasPipeline ? pipeline.revenue : 0);
+    const spend = q.spend || 0;
     return {
       quarter,
       spend,
-      leads: hasPipeline ? marketingLeads : marketingLeads || q.leads || 0,
+      leads: resolvedTotalLeads,
       referralLeads,
-      totalLeads,
+      totalLeads: resolvedTotalLeads,
       qualified: resolvedQualified,
       totalQualified: resolvedQualified,
       inProgress: pipeline.inProgress || 0,
@@ -1501,6 +1504,67 @@ function renderActiveView() {
   return renderOverviewView();
 }
 
+function ownerReadoutTile(label, value, note, tone = "") {
+  return `
+    <article class="owner-readout-tile ${tone}">
+      <span class="meta-label">${escapeHtml(label)}</span>
+      <strong>${value}</strong>
+      <p>${escapeHtml(note)}</p>
+    </article>
+  `;
+}
+
+function ownerExecutiveBrief(q, previous, origins, timing) {
+  const revenueChange = previous ? percentChange(q.revenue, previous.revenue) : null;
+  const qualifiedChange = previous ? percentChange(q.qualified, previous.qualified) : null;
+  const closingChange = previous ? q.closingRatio - previous.closingRatio : null;
+  const revenueDirection = revenueChange === null
+    ? "Current-quarter closed revenue"
+    : `${revenueChange >= 0 ? "Up" : "Down"} ${formatPct(Math.abs(revenueChange), 1)} from the prior quarter`;
+  const qualifiedDirection = qualifiedChange === null
+    ? "Current-quarter qualified volume"
+    : `${qualifiedChange >= 0 ? "Up" : "Down"} ${formatPct(Math.abs(qualifiedChange), 1)} from the prior quarter`;
+  const closeDirection = closingChange === null
+    ? "Current-quarter qualified-to-won conversion"
+    : `${closingChange >= 0 ? "Up" : "Down"} ${formatPct(Math.abs(closingChange), 1)} points from the prior quarter`;
+  let focus = "Maintain lead quality while moving active opportunities toward a decision.";
+  if (qualifiedChange !== null && qualifiedChange < 0) {
+    focus = `Rebuild qualified volume while protecting the ${formatMoney(safeRatio(q.revenue, q.won))} average deal value.`;
+  } else if (closingChange !== null && closingChange < 0) {
+    focus = "Review follow-up speed and sales handoff because qualified-to-won conversion softened.";
+  } else if (revenueChange !== null && revenueChange > 0) {
+    focus = `Scale the sources producing qualified opportunities, led by ${origins.topSource?.channel || "the strongest source"}.`;
+  }
+  return `
+    <section class="owner-brief executive-panel">
+      <div class="owner-brief-heading">
+        <div>
+          <span class="eyebrow">Owner executive brief</span>
+          <h2>${escapeHtml(q.quarter)} business outcome</h2>
+        </div>
+        <span class="basis-badge">Primary basis: Qualified Date</span>
+      </div>
+      <p class="owner-headline">Marketing produced <strong>${formatNumber(q.qualified)} qualified leads</strong> and <strong>${formatNumber(q.won)} won deals</strong>, generating <strong>${formatMoney(q.revenue)}</strong> in reported revenue. The active pipeline currently holds <strong>${formatMoney(q.pipelineValue)}</strong> in estimated opportunity value.</p>
+      <div class="owner-readout-grid">
+        ${ownerReadoutTile("Financial result", formatMoney(q.revenue), revenueDirection, revenueChange !== null && revenueChange >= 0 ? "positive" : "")}
+        ${ownerReadoutTile("Demand quality", `${formatNumber(q.qualified)} qualified`, `${qualifiedDirection}; ${formatNumber(q.totalLeads)} leads reported in Overall Quarterly Performance.`)}
+        ${ownerReadoutTile("Conversion", formatPct(q.closingRatio, 0), `${closeDirection}; ${timing.avgDaysToClose !== null ? `${timing.avgDaysToClose.toFixed(1)} average days from inquiry to close.` : "close timing unavailable."}`)}
+        ${ownerReadoutTile("Management focus", "Next action", focus, "attention")}
+      </div>
+    </section>
+  `;
+}
+
+function ownerSectionHeading(eyebrow, title, copy) {
+  return `
+    <section class="owner-section-heading">
+      <span class="eyebrow">${escapeHtml(eyebrow)}</span>
+      <h2>${escapeHtml(title)}</h2>
+      <p>${escapeHtml(copy)}</p>
+    </section>
+  `;
+}
+
 function renderOverviewView() {
   const q = overviewMetrics();
   const previous = previousOverviewMetrics();
@@ -1508,32 +1572,84 @@ function renderOverviewView() {
   const previousOrigins = previousOriginSummary();
   const channels = overviewChannelDetailRows(state.quarter, activeMonth());
   const compare = state.compareEnabled ? overviewMetrics(state.compareQuarter, activeCompareMonth()) : null;
+  const timing = leadTimingSummary();
   return `
-    <section class="kpi-grid">
-      ${metricCard("Spend", formatMoney(q.spend), "Total marketing investment for the selected period.", q.spend, previous?.spend)}
-      ${metricCard("Marketing leads", formatNumber(q.leads), "Leads attributed to paid, organic, social, and website channels.", q.leads, previous?.leads)}
-      ${metricCard("Referral leads", formatNumber(q.referralLeads), "Leads from referral sources.", q.referralLeads, previous?.referralLeads)}
-      ${metricCard("Total leads", formatNumber(q.totalLeads), "All leads for the selected period, including referrals.", q.totalLeads, previous?.totalLeads)}
-      ${metricCard("Qualified leads", formatNumber(q.qualified), "Leads marked qualified or sales-ready.", q.qualified, previous?.qualified)}
-      ${metricCard("In progress", formatNumber(q.inProgress), "Qualified leads that are not yet won or lost.", q.inProgress, previous?.inProgress)}
-      ${metricCard("Won deals", formatNumber(q.won), "Closed deals in the selected period, including referrals.", q.won, previous?.won)}
+    ${ownerExecutiveBrief(q, previous, origins, timing)}
+    ${ownerSectionHeading("High-level report", "Owner scorecard", "The primary business outcomes for the selected period. Quarterly figures use Overall Quarterly Performance and the Qualified Date reporting basis.")}
+    <section class="kpi-grid owner-scorecard-grid">
+      ${metricCard("Revenue won", formatMoney(q.revenue), "Revenue reported in Overall Quarterly Performance.", q.revenue, previous?.revenue)}
+      ${metricCard("Qualified leads", formatNumber(q.qualified), "Leads whose qualification is attributed to this Overall reporting period.", q.qualified, previous?.qualified)}
+      ${metricCard("Won deals", formatNumber(q.won), "Won leads reported in Overall Quarterly Performance.", q.won, previous?.won)}
       ${metricCard("Closing ratio", formatPct(q.closingRatio, 0), "Won deals divided by qualified leads.", q.closingRatio, previous?.closingRatio)}
-      ${metricCard("Revenue won", formatMoney(q.revenue), "Closed revenue in the selected period, including referrals.", q.revenue, previous?.revenue)}
-      ${metricCard("Avg. deal size", formatMoney(safeRatio(q.revenue, q.won)), "Average closed revenue per won deal.", safeRatio(q.revenue, q.won), previous ? safeRatio(previous.revenue, previous.won) : null)}
       ${metricCard("Pipeline value", formatMoney(q.pipelineValue), "Estimated value of qualified leads still in progress.", q.pipelineValue, previous?.pipelineValue)}
-      ${metricCard("CPQL", formatMoney(q.cpql, true), "Cost per qualified lead.", q.cpql, previous?.cpql)}
-      ${metricCard("CPA", formatMoney(q.cpa, true), "Cost per acquisition or won deal.", q.cpa, previous?.cpa)}
-      ${metricCard("Top qualified source", origins.topSource ? `${origins.topSource.channel} (${formatNumber(origins.topSource.qualified)})` : "-", "Original source producing the most qualified leads in this period.", origins.topSource?.qualified || 0, previousOrigins?.topSource?.qualified)}
-      ${metricCard("Avg. days to qualify", origins.avgDays ? `${Number(origins.avgDays).toFixed(1)} days` : "-", "Average time from inquiry date to qualified date.", origins.avgDays, previousOrigins?.avgDays)}
+      ${metricCard("Marketing spend", formatMoney(q.spend), "Total marketing investment reported for the selected period.", q.spend, previous?.spend)}
     </section>
     ${state.compareEnabled ? `${renderOverviewInlineCompare(q, compare)}${renderComparePeriodDetails()}` : `
+      ${renderAttributionBasisPanel()}
       ${renderQuarterlySummaryPanel()}
+      ${ownerSectionHeading("Detailed report", "Operating performance and pipeline", "Use this section to diagnose volume, cost efficiency, velocity, source contribution, closed deals, and current lead status.")}
+      <section class="kpi-grid detail-kpi-grid">
+      ${metricCard("Overall leads", formatNumber(q.totalLeads), "Lead count reported in Overall Quarterly Performance.", q.totalLeads, previous?.totalLeads)}
+      ${metricCard("In progress", formatNumber(q.inProgress), "Qualified leads that are not yet won or lost.", q.inProgress, previous?.inProgress)}
+      ${metricCard("Avg. deal size", formatMoney(safeRatio(q.revenue, q.won)), "Average closed revenue per won deal.", safeRatio(q.revenue, q.won), previous ? safeRatio(previous.revenue, previous.won) : null)}
+      ${metricCard("CPQL", formatMoney(q.cpql, true), "Cost per qualified lead.", q.cpql, previous?.cpql)}
+      ${metricCard("CPA", formatMoney(q.cpa, true), "Cost per acquisition or won deal.", q.cpa, previous?.cpa)}
+      ${metricCard("Top qualification source", origins.topSource ? `${origins.topSource.channel} (${formatNumber(origins.topSource.qualified)})` : "-", "Original source of leads whose Qualified Date falls in this period.", origins.topSource?.qualified || 0, previousOrigins?.topSource?.qualified)}
+      ${metricCard("Avg. days to qualify", origins.avgDays ? `${Number(origins.avgDays).toFixed(1)} days` : "-", "Average time from inquiry date to qualified date.", origins.avgDays, previousOrigins?.avgDays)}
+      ${metricCard("Avg. days to close", timing.avgDaysToClose !== null ? `${timing.avgDaysToClose.toFixed(1)} days` : "-", `Inquiry to Won Date for ${formatNumber(timing.closeSample)} valid closes in this period.`, timing.avgDaysToClose)}
+      ${metricCard("Revenue leverage", `${safeRatio(q.revenue, q.spend).toFixed(1)}x`, "Reported won revenue divided by marketing spend.", safeRatio(q.revenue, q.spend), previous ? safeRatio(previous.revenue, previous.spend) : null)}
+      </section>
       <section class="grid-2 equal-grid">
         ${renderWonDealsPanel(wonDealsFor().slice(0, 8), "Closed Deal Log", selectedPeriodLabel())}
         ${renderPipelinePanel(q)}
       </section>
     `}
-    ${state.compareEnabled ? "" : renderQuarterTable(channels)}
+    ${state.compareEnabled ? "" : renderQuarterTable(channels, `${selectedPeriodLabel()} · Date Added basis`)}
+  `;
+}
+
+function marketingQuarterFor(quarter = state.quarter) {
+  const rows = state.data.marketingQuarters || [];
+  if (isOverallPeriod(quarter)) {
+    const spend = sum(rows, "spend");
+    const leads = sum(rows, "leads");
+    const qualified = sum(rows, "qualified");
+    const won = sum(rows, "won");
+    const revenue = sum(rows, "revenue");
+    return { quarter, spend, leads, qualified, won, revenue, cpql: safeRatio(spend, qualified), cpa: safeRatio(spend, won), closingRatio: safeRatio(won, qualified) * 100 };
+  }
+  return rows.find((row) => row.quarter === quarter) || null;
+}
+
+function renderAttributionBasisPanel(quarter = state.quarter) {
+  if (state.granularity !== "Quarterly" || isOverallPeriod(quarter)) return "";
+  const qualification = findQuarter(quarter);
+  const intake = marketingQuarterFor(quarter);
+  if (!qualification || !intake) return "";
+  const metrics = [
+    ["Spend", "spend", "money"],
+    ["Leads", "leads", "number"],
+    ["Qualified leads", "qualified", "number"],
+    ["Won leads", "won", "number"],
+    ["Revenue won", "revenue", "money"],
+    ["CPQL", "cpql", "money"],
+    ["Closing ratio", "closingRatio", "pct"],
+  ];
+  return `
+    <section class="panel section attribution-panel">
+      <div class="panel-header"><h3>Overall vs Marketing Quarterly Performance</h3><span class="badge">${escapeHtml(quarter)}</span></div>
+      <p class="definition">These reports answer different questions. Overall Quarterly Performance groups outcomes by <strong>Qualified Date</strong>; Marketing Quarterly Performance groups outcomes by <strong>Date Added</strong>, when the lead first entered the pipeline. Channel tables use the lead-entry basis.</p>
+      <div class="table-wrap comparison-table">
+        <table>
+          <thead><tr><th>Metric</th><th>Qualification cohort<br><span class="fine-print">Overall Quarterly Performance</span></th><th>Lead-entry cohort<br><span class="fine-print">Marketing Quarterly Performance</span></th><th>Difference</th></tr></thead>
+          <tbody>${metrics.map(([label, key, type]) => {
+            const left = parseNumber(qualification[key]);
+            const right = parseNumber(intake[key]);
+            return `<tr><td><strong>${escapeHtml(label)}</strong></td><td>${formatMetricValue(left, type, key)}</td><td>${formatMetricValue(right, type, key)}</td><td>${formatMetricDiff(left - right, type, key)}</td></tr>`;
+          }).join("")}</tbody>
+        </table>
+      </div>
+    </section>
   `;
 }
 
@@ -1544,8 +1660,7 @@ function renderOverviewInlineCompare(current, compare) {
       <div class="panel-header"><h3>Comparison</h3><span class="badge">${escapeHtml(state.granularity === "Monthly" ? activeCompareMonth() : state.compareQuarter)}</span></div>
       ${renderDeltaGrid(current, compare, [
         ["Spend", "spend", "money"],
-        ["Marketing leads", "leads", "number"],
-        ["Total leads", "totalLeads", "number"],
+        ["Overall leads", "totalLeads", "number"],
         ["Qualified", "qualified", "number"],
         ["In progress", "inProgress", "number"],
         ["Closing ratio", "closingRatio", "pct"],
@@ -1656,13 +1771,13 @@ function renderQuarterlySummaryPanel() {
 }
 
 function periodSummaryRows(quarter = state.quarter, month = activeMonth()) {
-  if (isOverallPeriod(quarter)) {
+  if (state.granularity === "Quarterly" || isOverallPeriod(quarter)) {
     return {
-      title: "Period Performance Trend",
-      label: "All periods",
+      title: "Overall Quarterly Performance Trend",
+      label: "Qualified Date basis",
       rows: [...(state.data.quarters || [])]
         .sort((a, b) => quarterRank(a.quarter) - quarterRank(b.quarter))
-        .map((row) => ({ ...overviewMetrics(row.quarter, "All months"), period: row.quarter, isCurrent: row.quarter === uniqueQuarters()[0] })),
+        .map((row) => ({ ...row, period: row.quarter, isCurrent: row.quarter === quarter || (isOverallPeriod(quarter) && row.quarter === uniqueQuarters()[0]) })),
     };
   }
   if (state.granularity === "Monthly" && month !== "All months") {
@@ -1687,15 +1802,24 @@ function periodSummaryRows(quarter = state.quarter, month = activeMonth()) {
   const rows = monthlyRows(quarter).map((row) => {
     const channels = channelMetricsFor(quarter, row.month);
     const leadMetrics = leadPipelineMetrics(quarter, row.month);
+    const reportedLeads = sum(channels, "leads");
+    const reportedQualified = sum(channels, "qualified");
+    const reportedWon = sum(channels, "won");
+    const reportedRevenue = sum(channels, "revenue");
+    const hasReportedRows = channels.length > 0;
+    const resolvedLeads = hasReportedRows ? reportedLeads : leadMetrics.leads || row.leads;
+    const resolvedQualified = hasReportedRows ? reportedQualified : leadMetrics.qualified || row.qualified;
+    const resolvedWon = hasReportedRows ? reportedWon : leadMetrics.won || row.won;
+    const resolvedRevenue = hasReportedRows ? reportedRevenue : leadMetrics.revenue || row.revenue;
     return {
       period: row.month,
-      leads: leadMetrics.leads || row.leads,
-      qualified: leadMetrics.qualified || row.qualified,
+      leads: resolvedLeads,
+      qualified: resolvedQualified,
       spend: sum(channels, "spend"),
-      revenue: leadMetrics.revenue || row.revenue,
-      won: leadMetrics.won || row.won,
-      winRate: safeRatio(leadMetrics.won || row.won, leadMetrics.qualified || row.qualified) * 100,
-      closingRatio: safeRatio(leadMetrics.won || row.won, leadMetrics.qualified || row.qualified) * 100,
+      revenue: resolvedRevenue,
+      won: resolvedWon,
+      winRate: safeRatio(resolvedWon, resolvedQualified) * 100,
+      closingRatio: safeRatio(resolvedWon, resolvedQualified) * 100,
     };
   });
   return { title: "Period Performance Trend", label: quarter, rows };
@@ -1910,6 +2034,39 @@ function qualifiedOriginSummary(quarter = state.quarter, month = activeMonth()) 
   };
 }
 
+function leadRecordsForEvent(dateKey, quarter = state.quarter, month = activeMonth()) {
+  return (state.data.leadSummary?.leadRecords || []).filter((row) => {
+    const date = row[dateKey];
+    if (!date) return false;
+    if (!isOverallPeriod(quarter) && quarterFromDate(date) !== quarter) return false;
+    return month === "All months" || monthLabel(date) === month;
+  });
+}
+
+function averageValues(values) {
+  return values.length ? values.reduce((total, value) => total + value, 0) / values.length : null;
+}
+
+function leadTimingSummary(quarter = state.quarter, month = activeMonth()) {
+  const qualificationRows = leadRecordsForEvent("qualifiedDate", quarter, month);
+  const closeRows = leadRecordsForEvent("wonDate", quarter, month);
+  const qualificationDays = qualificationRows.map((row) => daysBetween(row.date, row.qualifiedDate)).filter((value) => value !== null);
+  const closeDays = closeRows.map((row) => daysBetween(row.date, row.wonDate)).filter((value) => value !== null);
+  const qualifiedToCloseDays = closeRows.map((row) => daysBetween(row.qualifiedDate, row.wonDate)).filter((value) => value !== null);
+  return {
+    qualificationCount: qualificationRows.length,
+    closeCount: closeRows.length,
+    qualificationSample: qualificationDays.length,
+    closeSample: closeDays.length,
+    qualifiedToCloseSample: qualifiedToCloseDays.length,
+    avgDaysToQualify: averageValues(qualificationDays),
+    avgDaysToClose: averageValues(closeDays),
+    avgQualifiedToClose: averageValues(qualifiedToCloseDays),
+    excludedQualification: qualificationRows.length - qualificationDays.length,
+    excludedClose: closeRows.length - closeDays.length,
+  };
+}
+
 function daysBetween(start, end) {
   const startIso = toIsoDate(start);
   const endIso = toIsoDate(end);
@@ -1917,13 +2074,15 @@ function daysBetween(start, end) {
   const startDate = new Date(`${startIso}T12:00:00`);
   const endDate = new Date(`${endIso}T12:00:00`);
   if (Number.isNaN(startDate.getTime()) || Number.isNaN(endDate.getTime())) return null;
-  return Math.max(0, Math.round((endDate - startDate) / 86400000));
+  const difference = Math.round((endDate - startDate) / 86400000);
+  return difference < 0 ? null : difference;
 }
 
 function renderQuarterTable(rows, label = selectedPeriodLabel()) {
   return `
     <section class="panel">
-      <div class="panel-header"><h3>Lead Source Overview</h3><span class="fine-print">${escapeHtml(label)}</span></div>
+      <div class="panel-header"><h3>Supporting Channel Detail</h3><span class="fine-print">${escapeHtml(label)}</span></div>
+      <p class="definition">Channel figures are supporting detail grouped by Date Added. They do not replace the Overall qualification-date KPIs above.</p>
       <div class="table-wrap">
         <table>
           <thead><tr><th>Channel</th><th>Spend</th><th>Leads</th><th>Qualified</th><th>Unqualified</th><th>CPQL</th><th>Won</th><th>Closing ratio</th><th>Revenue</th><th>ROAS</th></tr></thead>
@@ -2695,6 +2854,8 @@ function qualityBar(label, value, total, displayValue = formatNumber(value)) {
 function renderSeoView() {
   const seo = seoForPeriod();
   const gbp = gbpForPeriod();
+  const brandedClicks = sum((seo.keywordRows || []).filter((row) => String(row.keyword || "").toLowerCase().includes("terzetto")), "clicks");
+  const queryClicks = sum(seo.keywordRows || [], "clicks");
   const compareSeo = state.compareEnabled
     ? seoForPeriod(state.compareQuarter, activeCompareMonth())
     : previousSeoAggregate();
@@ -2705,12 +2866,14 @@ function renderSeoView() {
         <p class="definition">${escapeHtml(state.data.reportDefinitions.seo)}</p>
       </div>
     </section>
+    ${seo.sourceRange ? `<section class="seo-source-note"><div><span class="meta-label">Search Console source</span><strong>${escapeHtml(seo.source || "Google Search Console export")}</strong></div><div><span class="meta-label">Detailed export range</span><strong>${escapeHtml(seo.sourceRange)}</strong></div><p>${escapeHtml(seo.detailScope || "Query and page tables use the detailed export range shown here.")}</p></section>` : ""}
     <section class="kpi-grid">
       ${metricCard("Search clicks", formatNumber(seo.clicks), "Organic clicks from Google Search Console.", seo.clicks)}
       ${metricCard("Impressions", formatNumber(seo.impressions), "Organic search result impressions.", seo.impressions)}
       ${metricCard("Average CTR", formatPct(seo.ctr, 2), "Organic click-through rate.", seo.ctr)}
       ${metricCard("Avg. position", Number(seo.avgPosition || 0).toFixed(1), "Average keyword ranking position.", seo.avgPosition)}
-      ${metricCard("GBP clicks", formatNumber(gbp.websiteClicks), "Website clicks from Google Business Profile.", gbp.websiteClicks)}
+      ${metricCard("Branded click share", formatPct(safeRatio(brandedClicks, queryClicks) * 100, 0), "Share of query-level clicks containing the Terzetto brand name.", safeRatio(brandedClicks, queryClicks) * 100)}
+      ${metricCard("Queries in export", formatNumber(seo.keywordCount || (seo.keywordRows || []).length), "Unique query rows included in the detailed Search Console export.", seo.keywordCount || (seo.keywordRows || []).length)}
     </section>
     ${state.compareEnabled ? `<section class="panel"><div class="panel-header"><h3>SEO Comparison</h3><span class="badge">Selected comparison</span></div>${differenceRows(seo, compareSeo, [["Clicks", "clicks", "number"], ["Impressions", "impressions", "number"], ["CTR", "ctr", "pct"], ["Avg. position", "avgPosition", "number"]])}</section>${renderSeoCompareDetails(seo, compareSeo, gbp, gbpForPeriod(state.compareQuarter, activeCompareMonth()))}` : `
       <section class="grid-2">
@@ -2722,6 +2885,16 @@ function renderSeoView() {
         ${renderGbpPanel(gbp)}
       </section>
     `}
+    <section class="grid-2 equal-grid">
+      <article class="panel">
+        <div class="panel-header"><h3>Top Search Queries</h3><span class="badge">By clicks</span></div>
+        ${renderTopSearchQueryTable(seo.keywordRows || [])}
+      </article>
+      <article class="panel">
+        <div class="panel-header"><h3>Search by Device</h3><span class="badge">${escapeHtml(seo.sourceRange || selectedPeriodLabel())}</span></div>
+        ${renderSearchSegmentTable(seo.deviceRows || [], "device")}
+      </article>
+    </section>
     <section class="panel">
       <div class="panel-header"><h3>Top Ranking Keywords</h3><span class="badge">Best positions</span></div>
       ${renderTopRankingKeywords(seo.keywordRows || [])}
@@ -2751,6 +2924,10 @@ function renderSeoView() {
     <section class="panel">
       <div class="panel-header"><h3>Top Organic Pages</h3><span class="badge">Clicks, impressions, CTR, position</span></div>
       ${renderTopPagesTable(seo.topPages || [])}
+    </section>
+    <section class="panel">
+      <div class="panel-header"><h3>Geographic Search Performance</h3><span class="badge">Top countries by clicks</span></div>
+      ${renderSearchSegmentTable(seo.countryRows || [], "country", 12)}
     </section>
   `;
 }
@@ -2810,6 +2987,36 @@ function renderTopPagesTable(rows) {
   `;
 }
 
+function renderTopSearchQueryTable(rows) {
+  const visible = [...rows]
+    .sort((a, b) => parseNumber(b.clicks) - parseNumber(a.clicks) || parseNumber(b.impressions) - parseNumber(a.impressions))
+    .slice(0, 10);
+  if (!visible.length) return `<p class="definition">No query-level Search Console data is available for this period.</p>`;
+  return `
+    <div class="table-wrap compact-table">
+      <table>
+        <thead><tr><th>Query</th><th>Clicks</th><th>Impressions</th><th>CTR</th><th>Position</th></tr></thead>
+        <tbody>${visible.map((row) => `<tr><td><strong>${escapeHtml(row.keyword)}</strong></td><td>${formatNumber(row.clicks)}</td><td>${formatNumber(row.impressions)}</td><td>${formatPct(row.ctr, 2)}</td><td>${Number(row.position || 0).toFixed(1)}</td></tr>`).join("")}</tbody>
+      </table>
+    </div>
+  `;
+}
+
+function renderSearchSegmentTable(rows, labelKey, limit = 10) {
+  const visible = [...rows]
+    .sort((a, b) => parseNumber(b.clicks) - parseNumber(a.clicks) || parseNumber(b.impressions) - parseNumber(a.impressions))
+    .slice(0, limit);
+  if (!visible.length) return `<p class="definition">No ${escapeHtml(labelKey)} breakdown is available in this Search Console export.</p>`;
+  return `
+    <div class="table-wrap compact-table">
+      <table>
+        <thead><tr><th>${escapeHtml(labelKey === "device" ? "Device" : "Country")}</th><th>Clicks</th><th>Impressions</th><th>CTR</th><th>Position</th></tr></thead>
+        <tbody>${visible.map((row) => `<tr><td><strong>${escapeHtml(row[labelKey])}</strong></td><td>${formatNumber(row.clicks)}</td><td>${formatNumber(row.impressions)}</td><td>${formatPct(row.ctr, 2)}</td><td>${Number(row.position || 0).toFixed(1)}</td></tr>`).join("")}</tbody>
+      </table>
+    </div>
+  `;
+}
+
 function renderTopRankingKeywords(rows) {
   const visible = [...rows]
     .filter((row) => parseNumber(row.impressions) > 0 && parseNumber(row.position) > 0)
@@ -2858,7 +3065,7 @@ function renderKeywordTable(rows, compareRows = []) {
   return `
     <div class="table-wrap compact-table">
       <table>
-        <thead><tr><th>Keyword</th><th>Impressions</th><th>Position</th>${hasCompare ? "<th>Compare impressions</th><th>Compare position</th><th>Change</th>" : ""}</tr></thead>
+        <thead><tr><th>Keyword</th><th>Clicks</th><th>Impressions</th><th>CTR</th><th>Position</th>${hasCompare ? "<th>Compare impressions</th><th>Compare position</th><th>Change</th>" : ""}</tr></thead>
         <tbody>${visibleRows
           .map(
             (row) => {
@@ -2872,7 +3079,7 @@ function renderKeywordTable(rows, compareRows = []) {
               const compareCells = hasCompare
                 ? `<td>${compare ? formatNumber(compareImpressions) : "-"}</td><td>${compare ? Number(comparePosition || 0).toFixed(1) : "-"}</td><td><span class="${impressionDiff >= 0 ? "up" : "down"}">${compare ? `${impressionDiff >= 0 ? "+" : ""}${formatNumber(impressionDiff)} impr.` : "-"}</span><br><span class="${positionDiff <= 0 ? "up" : "down"}">${compare ? `${positionDiff <= 0 ? "" : "+"}${Number(positionDiff || 0).toFixed(1)} pos.` : ""}</span></td>`
                 : "";
-              return `<tr><td><strong>${escapeHtml(row.keyword)}</strong></td><td>${formatNumber(impressions)}</td><td>${Number(position || 0).toFixed(1)}</td>${compareCells}</tr>`;
+              return `<tr><td><strong>${escapeHtml(row.keyword)}</strong></td><td>${formatNumber(row.clicks)}</td><td>${formatNumber(impressions)}</td><td>${formatPct(row.ctr, 2)}</td><td>${Number(position || 0).toFixed(1)}</td>${compareCells}</tr>`;
             },
           )
           .join("")}</tbody>
@@ -2933,6 +3140,7 @@ function renderLeadsView() {
   const leadsNotQualified = Math.max(0, q.totalLeads - q.totalQualified);
   const previousNotQualified = previous ? Math.max(0, previous.totalLeads - previous.totalQualified) : null;
   const wonDeals = wonDealsFor();
+  const timing = leadTimingSummary();
   return `
     <section class="section-header">
       <div>
@@ -2950,6 +3158,9 @@ function renderLeadsView() {
       ${metricCard("Avg. deal size", formatMoney(safeRatio(q.revenue, q.won)), "Average closed revenue per won deal.", safeRatio(q.revenue, q.won), previous ? safeRatio(previous.revenue, previous.won) : null)}
       ${metricCard("CPA", formatMoney(q.cpa, true), "Cost per acquisition or won deal.", q.cpa, previous?.cpa)}
       ${metricCard("Pipeline value", formatMoney(q.pipelineValue), "Estimated value of qualified leads still in progress.", q.pipelineValue, previous?.pipelineValue)}
+      ${metricCard("Avg. days to qualify", timing.avgDaysToQualify !== null ? `${timing.avgDaysToQualify.toFixed(1)} days` : "-", `Date Added to Qualified Date; ${formatNumber(timing.qualificationSample)} valid records.`, timing.avgDaysToQualify)}
+      ${metricCard("Avg. days to close", timing.avgDaysToClose !== null ? `${timing.avgDaysToClose.toFixed(1)} days` : "-", `Date Added to Won Date; ${formatNumber(timing.closeSample)} valid records.`, timing.avgDaysToClose)}
+      ${metricCard("Qualified to close", timing.avgQualifiedToClose !== null ? `${timing.avgQualifiedToClose.toFixed(1)} days` : "-", `Qualified Date to Won Date; ${formatNumber(timing.qualifiedToCloseSample)} valid records.`, timing.avgQualifiedToClose)}
     </section>
     ${state.compareEnabled ? `<section class="panel section"><div class="panel-header"><h3>Pipeline Comparison</h3><span class="badge">${escapeHtml(state.granularity === "Monthly" ? activeCompareMonth() : state.compareQuarter)}</span></div>${renderDeltaGrid(q, previous, [["Total leads", "totalLeads", "number"], ["Qualified leads", "totalQualified", "number"], ["In progress", "inProgress", "number"], ["Won deals", "won", "number"], ["Closing ratio", "closingRatio", "pct"], ["CPA", "cpa", "money"], ["Pipeline value", "pipelineValue", "money"], ["Revenue won", "revenue", "money"]])}</section>${renderComparePeriodDetails()}${renderLeadCompareTables()}` : `
       <section class="grid-2 equal-grid">
@@ -3004,15 +3215,17 @@ function renderQualifiedOriginPanel(summary, label = selectedPeriodLabel()) {
 }
 
 function renderQualifiedOriginLagPanel(summary, label = selectedPeriodLabel()) {
+  const timing = leadTimingSummary();
   return `
     <article class="panel">
-      <div class="panel-header"><h3>Qualification Timing</h3><span class="fine-print">${escapeHtml(label)}</span></div>
+      <div class="panel-header"><h3>Lead Lifecycle Timing</h3><span class="fine-print">${escapeHtml(label)}</span></div>
       <div class="metric-strip origin-strip">
-        <div><span class="meta-label">Avg. days to qualify</span><strong>${summary.avgDays ? Number(summary.avgDays).toFixed(1) : "-"}</strong></div>
+        <div><span class="meta-label">Avg. inquiry → qualify</span><strong>${timing.avgDaysToQualify !== null ? timing.avgDaysToQualify.toFixed(1) : "-"}</strong></div>
+        <div><span class="meta-label">Avg. inquiry → won</span><strong>${timing.avgDaysToClose !== null ? timing.avgDaysToClose.toFixed(1) : "-"}</strong></div>
+        <div><span class="meta-label">Avg. qualify → won</span><strong>${timing.avgQualifiedToClose !== null ? timing.avgQualifiedToClose.toFixed(1) : "-"}</strong></div>
         <div><span class="meta-label">From prior period</span><strong>${formatNumber(summary.previousPeriodCount || 0)}</strong></div>
-        <div><span class="meta-label">Fastest source</span><strong>${summary.fastestSource ? escapeHtml(summary.fastestSource.channel) : "-"}</strong></div>
-        <div><span class="meta-label">Slowest source</span><strong>${summary.slowestSource ? escapeHtml(summary.slowestSource.channel) : "-"}</strong></div>
       </div>
+      <p class="fine-print">Samples: ${formatNumber(timing.qualificationSample)} qualifications and ${formatNumber(timing.closeSample)} closes. ${formatNumber(timing.excludedQualification + timing.excludedClose)} missing or reversed timestamp sequence(s) were excluded from averages.</p>
       <div class="table-wrap compact-table origin-source-table">
         <table>
           <thead><tr><th>Source</th><th>Qualified</th><th>Won</th><th>Avg. days</th><th>Revenue</th></tr></thead>
@@ -3696,6 +3909,7 @@ async function refreshAirtableFromEndpoint({ endpoint = state.data.manual.sync?.
 }
 
 async function logCeoView() {
+  if (window.location.protocol === "file:" || ["localhost", "127.0.0.1"].includes(window.location.hostname)) return;
   const endpoint = state.data.manual.sync?.activityEndpoint || defaultActivityEndpoint();
   if (!endpoint) return;
   const key = [
@@ -4526,14 +4740,17 @@ function aggregateLeadRows(rows) {
     const qualifiedPeriodDate = qualifiedDate || (fallbackQualified ? dateAdded : "");
     const qualifiedMonth = qualifiedPeriodDate ? monthLabel(qualifiedPeriodDate) : month;
     const qualifiedQuarter = qualifiedPeriodDate ? quarterFromDate(qualifiedPeriodDate) || state.quarter : "";
-    const won = cellTruthy(fieldValue(row, ["Won?", "Won Count", "Won Leads", "Won"])) || statusLower === "won" ? 1 : 0;
+    const wonDate = fieldValue(row, ["Won Date", "Date Won", "Closed Date"]);
+    const won = Boolean(wonDate) || cellTruthy(fieldValue(row, ["Won?", "Won Count", "Won Leads", "Won"])) || statusLower === "won" ? 1 : 0;
     const lost = statusLower === "lost" ? 1 : 0;
     const inProgress = qualified && !won && !lost ? 1 : 0;
     const revenue = parseNumber(row["Revenue Won"]);
     const pipelineValue = inProgress ? parseNumber(row["Est. Revenue"]) : 0;
-    const quarter = cellText(row.Quarter) || quarterFromDate(dateAdded) || state.quarter;
+    const quarter = cellText(fieldValue(row, ["Lead Quarter", "Quarter"])) || quarterFromDate(dateAdded) || state.quarter;
     const lifecycleQuarter = qualifiedPeriodDate ? qualifiedQuarter : quarter;
     const lifecycleMonth = qualifiedPeriodDate ? qualifiedMonth : month;
+    const wonQuarter = wonDate ? quarterFromDate(wonDate) : "";
+    const wonMonth = wonDate ? monthLabel(wonDate) : "";
     leadRecords.push({
       name: cellText(row.Name, "Unnamed lead"),
       status,
@@ -4545,10 +4762,13 @@ function aggregateLeadRows(rows) {
       leadMonth: month,
       qualifiedQuarter,
       qualifiedMonth,
+      wonQuarter,
+      wonMonth,
       revenue,
       pipelineValue,
       date: toIsoDate(dateAdded),
       qualifiedDate: toIsoDate(qualifiedPeriodDate),
+      wonDate: toIsoDate(wonDate),
     });
     statuses[status] = (statuses[status] || 0) + 1;
     sources[source] = (sources[source] || 0) + 1;
@@ -4584,10 +4804,12 @@ function aggregateLeadRows(rows) {
         client: cellText(row.Name, "Closed deal"),
         source: channel || source,
         revenue,
-        date: toIsoDate(qualifiedPeriodDate || dateAdded),
-        label: shortDate(qualifiedPeriodDate || dateAdded),
+        date: toIsoDate(wonDate || qualifiedPeriodDate || dateAdded),
+        label: shortDate(wonDate || qualifiedPeriodDate || dateAdded),
         quarter: lifecycleQuarter,
         month: lifecycleMonth,
+        wonQuarter,
+        wonMonth,
       });
     }
     totals.qualified += qualified;
